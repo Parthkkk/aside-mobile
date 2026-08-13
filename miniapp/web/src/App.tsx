@@ -29,7 +29,11 @@ import { TabDeck } from './components/TabDeck';
 import { WatchModeCard } from './components/WatchMode';
 import type { CitationMark } from './utils/citations';
 import { api, setAuthToken, setUnauthorizedHandler } from './api';
-import { clearStoredToken, resolveStandaloneAuth } from './standalone';
+import {
+  clearStoredToken,
+  readStoredToken,
+  resolveStandaloneAuth,
+} from './standalone';
 import { PairPrompt } from './components/PairPrompt';
 import { InstallHint } from './components/InstallHint';
 import { useThread } from './hooks/useThread';
@@ -271,11 +275,20 @@ export default function App() {
      * stops working. Drop the dead token and ask to be paired again.
      */
     setUnauthorizedHandler(() => {
+      /*
+       * Two different situations produce the same 401 and they need
+       * different words. A device that HAD a token has been revoked, and
+       * saying so is the only way the owner knows re-pairing is the fix. A
+       * device that never had one is simply new, and telling it the Mac "no
+       * longer recognises" it describes a relationship that never existed.
+       */
+      const wasPaired = Boolean(readStoredToken());
       clearStoredToken();
       setAuth({
         phase: 'failed',
-        reason:
-          'Your Mac no longer recognises this device. Paste a fresh pairing link from your Mac below.',
+        reason: wasPaired
+          ? 'Your Mac no longer recognises this device. Paste a fresh pairing link from your Mac below.'
+          : 'Not paired yet. Paste the pairing link from your Mac below.',
       });
     });
 
