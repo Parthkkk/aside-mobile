@@ -100,7 +100,26 @@ export interface ComposerProps {
   context?: { used: number; window: number };
   /** Rendered directly above the composer: the task list. */
   above?: React.ReactNode;
+  /**
+   * What this field is aimed at.
+   *
+   * Search used to be a second page reached by swiping, which made it a
+   * place rather than a mode: you could not tell from the composer what
+   * would happen when you typed, because typing happened somewhere else.
+   * Both jobs are "put words in a box and go somewhere", so they differ in
+   * destination and not in gesture, which is what a segmented control is
+   * for. Absent on the reply composer, which has only one destination.
+   */
+  mode?: ComposerMode;
+  onModeChange?: (mode: ComposerMode) => void;
 }
+
+export type ComposerMode = 'chat' | 'search';
+
+/** Horizontal travel before a drag across the composer is read as intent. */
+const SWIPE_CLAIM_PX = 14;
+/** How much horizontal must beat vertical to count as a sideways gesture. */
+const SWIPE_DOMINANCE = 1.4;
 
 /** The `✳ Fable 5 ∨` / `High ∨` triggers from the bottom bar. */
 export function Pill({
@@ -245,6 +264,8 @@ export function Composer({
   recoverLabel,
   context,
   above,
+  mode,
+  onModeChange,
 }: ComposerProps) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -296,8 +317,84 @@ export function Composer({
     submit();
   };
 
+  /*
+   * Swipe across the composer to flip the mode.
+   *
+   * The toggle is the affordance; this is the fast path for a thumb that
+   * already knows where it is going, and it keeps the direct-manipulation
+   * feel the swipe-to-search page had before this replaced it.
+   *
+   * The claim rules are the ones `useSidePager` used, for the same reason:
+   * this surface also owns a vertical axis (the textarea scrolls once it
+   * has grown) and a horizontal one (text selection). A gesture is only
+   * taken once travel is unambiguous, and one resolved as vertical can
+   * never be reinterpreted later, which is what stops a diagonal drag from
+   * flipping the mode halfway through a scroll.
+   */
+  const swipe = useRef({ x: 0, y: 0, resolved: '' as '' | 'x' | 'y' });
+
+  const canSwitch = Boolean(mode && onModeChange);
+
+  /*
+   * Entering web mode puts the caret in the box.
+   *
+   * Otherwise switching costs two taps to do one thing. The keyboard comes
+   * up with it, which is correct here: suggestions are docked directly
+   * above the field, so the keyboard pushes them up rather than covering
+   * them. Deliberately not the reverse -- leaving web mode does not steal
+   * focus, because you may be flipping back mid-thought.
+   */
+  const wasSearch = useRef(false);
+  useEffect(() => {
+    if (mode === 'search' && !wasSearch.current) {
+      // After paint, or the software keyboard does not come up.
+      const t = window.setTimeout(() => textarea.current?.focus(), 60);
+      wasSearch.current = true;
+      return () => window.clearTimeout(t);
+    }
+    if (mode !== 'search') wasSearch.current = false;
+  }, [mode]);
+
+  const onTouchStart = (e: React.TouchEvent) => {
+    if (!canSwitch) return;
+    const t = e.touches[0];
+    swipe.current = { x: t.clientX, y: t.clientY, resolved: '' };
+  };
+
+  const onTouchMove = (e: React.TouchEvent) => {
+    if (!canSwitch || swipe.current.resolved) return;
+    const t = e.touches[0];
+    const dx = t.clientX - swipe.current.x;
+    const dy = t.clientY - swipe.current.y;
+    if (Math.abs(dy) > SWIPE_CLAIM_PX && Math.abs(dy) > Math.abs(dx)) {
+      swipe.current.resolved = 'y';
+      return;
+    }
+    if (
+      Math.abs(dx) > SWIPE_CLAIM_PX &&
+      Math.abs(dx) > Math.abs(dy) * SWIPE_DOMINANCE
+    ) {
+      swipe.current.resolved = 'x';
+      const next: ComposerMode = dx < 0 ? 'search' : 'chat';
+      if (next !== mode) {
+        haptic('light');
+        onModeChange?.(next);
+      }
+    }
+  };
+
+  const onTouchEnd = () => {
+    swipe.current.resolved = '';
+  };
+
   return (
-    <div className={`composer composer-${variant}`}>
+    <div
+      className={`composer composer-${variant}${mode === 'search' ? ' composer-search' : ''}`}
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+      onTouchCancel={onTouchEnd}
+    >
       {/* The task list sits ON TOP of the composer, as in the desktop app. */}
       {above}
 
@@ -340,10 +437,22 @@ export function Composer({
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={onKeyDown}
         placeholder={
-          variant === 'home' ? 'Chat with Aside…' : 'Reply to Aside…'
+          mode === 'search'
+            ? 'Search the web'
+            : variant === 'home'
+              ? 'Chat with Aside…'
+              : 'Reply to Aside…'
         }
         rows={1}
         disabled={blocked}
+        /*
+         * Search mode gets the magnifier return key, and turns off the
+         * corrections that fight a URL or a query. Chat wants all of them.
+         */
+        enterKeyHint={mode === 'search' ? 'search' : undefined}
+        autoCorrect={mode === 'search' ? 'off' : undefined}
+        autoCapitalize={mode === 'search' ? 'off' : undefined}
+        spellCheck={mode === 'search' ? false : undefined}
       />
 
       {voiceError ? (
@@ -372,19 +481,31 @@ export function Composer({
             event.target.value = '';
           }}
         />
-        <button
-          type="button"
-          className="round-button ghost"
-          aria-label="Attach files"
-          onClick={() => {
-            haptic('light');
-            fileInput.current?.click();
-          }}
-        >
-          <Plus size={17} strokeWidth={1.75} />
-        </button>
+        {/*
+          Attach, permission and model are hidden in search mode rather than
+          disabled, because none of them mean anything to a web search and a
+          greyed-out model picker still reads as "this will use a model".
+          This is the one place the furniture is allowed to change: the rule
+          elsewhere in this file is that it must not, and the reason is that
+          a control which does nothing is worse than an absent one.
+        */}
+        {mode !== 'search' ? (
+          <>
+            <button
+              type="button"
+              className="round-button ghost"
+              aria-label="Attach files"
+              onClick={() => {
+                haptic('light');
+                fileInput.current?.click();
+              }}
+            >
+              <Plus size={17} strokeWidth={1.75} />
+            </button>
 
-        <PermissionButton mode={permissionMode} onOpen={onOpenPermission} />
+            <PermissionButton mode={permissionMode} onOpen={onOpenPermission} />
+          </>
+        ) : null}
 
         {/*
           Pills sit immediately after the round buttons, with the slack
@@ -401,14 +522,18 @@ export function Composer({
           keeps one composer and only swaps the placeholder, which is why
           its thread does not feel like a second app.
         */}
-        {context ? (
-          <ContextRing used={context.used} window={context.window} />
+        {mode !== 'search' ? (
+          <>
+            {context ? (
+              <ContextRing used={context.used} window={context.window} />
+            ) : null}
+            <Pill
+              label={pills.modelLabel}
+              onOpen={onOpenModel}
+              mark={pills.provider}
+            />
+          </>
         ) : null}
-        <Pill
-          label={pills.modelLabel}
-          onOpen={onOpenModel}
-          mark={pills.provider}
-        />
         <span className="composer-spacer" />
 
         {/*

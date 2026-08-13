@@ -11,18 +11,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SessionList } from './components/SessionList';
 import { Thread } from './components/Thread';
 import { Composer } from './components/Composer';
+import type { ComposerMode } from './components/Composer';
 import { PermissionPicker } from './components/Pickers';
 import { ModelSheet } from './components/ModelSheet';
 import { CitationSheet } from './components/Citations';
 import { SessionPanel } from './components/SessionPanel';
 import { SettingsScreen } from './components/SettingsScreen';
 import { RestCue, RestHero } from './components/Rest';
-import { SearchPanel } from './components/SearchPanel';
-import { useSidePager } from './hooks/useSidePager';
+import { OmniboxResults } from './components/OmniboxResults';
+import { ModeSwitch } from './components/ModeSwitch';
+import { useOmnibox } from './hooks/useOmnibox';
 import { StreamFooter, estimateTokens } from './components/StreamFooter';
 import { TodoSection } from './components/TodoSection';
 import { ErrorCard } from './components/ErrorCard';
-import { ChevronLeft, Globe, PanelRight, Search, Spinner } from './components/Icons';
+import { ChevronLeft, Globe, PanelRight, Spinner } from './components/Icons';
 import { TabDeck } from './components/TabDeck';
 import { WatchModeCard } from './components/WatchMode';
 import type { CitationMark } from './utils/citations';
@@ -150,7 +152,31 @@ export default function App() {
    * because the screens below return early, and a hook behind a branch is
    * a hook that changes order between renders.
    */
-  const pager = useSidePager((next) => haptic(next === 1 ? 'light' : 'soft'));
+  /*
+   * Chat or search, and deliberately not persisted.
+   *
+   * A sticky mode is the classic source of "why did it do that": you come
+   * back tomorrow, type a message to your agent, and it gets Googled. Every
+   * cold launch starts in chat, so the default is always the one you can
+   * guess without looking.
+   */
+  const [composerMode, setComposerMode] = useState<ComposerMode>('chat');
+
+  const omnibox = useOmnibox(
+    draft,
+    composerMode === 'search',
+    useCallback(() => setDraft(''), []),
+  );
+
+  /*
+   * Leaving search takes the suggestion list with it. Without this the
+   * rows are still mounted behind the thread for as long as the draft is
+   * unchanged, and flipping back shows a list built from a prefix that is
+   * no longer in the box.
+   */
+  useEffect(() => {
+    if (composerMode !== 'search') omnibox.clear();
+  }, [composerMode, omnibox.clear]);
   // The two elements the dock-height measurement needs: the shell it
   // writes the variable onto, and the dock it measures.
   const homeShell = useRef<HTMLDivElement>(null);
@@ -571,9 +597,8 @@ export default function App() {
   if (!screen) {
     return (
       <div
-        className={`app app-home${pager.page === 1 ? ' side-open' : ''}${pager.dragging ? ' side-dragging' : ''}`}
+        className={`app app-home${composerMode === 'search' ? ' mode-web' : ''}`}
         ref={homeShell}
-        {...pager.handlers}
       >
         {/*
           Home screen only. It refers to Safari's Share button, so it
@@ -604,20 +629,19 @@ export default function App() {
               up rather than something you go looking for mid-thread.
             */}
             <div className="home-topbar">
+              {/*
+                Centred on the SCREEN, not on the space left over by its
+                neighbours: it is positioned absolutely so the waiting badge
+                appearing or disappearing cannot shunt it sideways.
+
+                The magnifier that used to sit here is gone rather than
+                moved. Its only job was travelling to the search page, and
+                search is a mode now, so there is nowhere for it to go.
+              */}
+              <ModeSwitch mode={composerMode} onChange={setComposerMode} />
               {waitingCount > 0 ? (
                 <span className="waiting-badge" aria-label={`${waitingCount} waiting`}>{waitingCount}</span>
               ) : null}
-              <button
-                type="button"
-                className="icon-button"
-                onClick={() => {
-                  haptic('light');
-                  pager.open();
-                }}
-                aria-label="Search the web"
-              >
-                <Search size={19} strokeWidth={1.75} />
-              </button>
               <button
                 type="button"
                 className="icon-button"
@@ -649,7 +673,9 @@ export default function App() {
             variant="home"
             value={draft}
             onChange={setDraft}
-            onSubmit={startSession}
+            onSubmit={
+              composerMode === 'search' ? () => omnibox.runQuery(draft) : startSession
+            }
             pills={pills}
             onOpenModel={openModel}
             onOpenPermission={openPermission}
@@ -659,6 +685,17 @@ export default function App() {
             onRemoveAttachment={attachments.remove}
             busy={sending}
             disabled={sending}
+            mode={composerMode}
+            onModeChange={setComposerMode}
+            above={
+              composerMode === 'search' ? (
+                <OmniboxResults
+                  items={omnibox.items}
+                  query={draft}
+                  onPick={omnibox.pick}
+                />
+              ) : undefined
+            }
           />
         </footer>
         {renderPicker({
@@ -676,24 +713,6 @@ export default function App() {
             haptic('light');
           },
         })}
-        {/*
-          The side page rides above the home screen rather than sharing a
-          transformed track with it. A transform on a common ancestor would
-          become the containing block for the docked composer and the
-          sheets, which is a lot of layout risk for a panel that only ever
-          needs to slide in from one edge.
-        */}
-        <div
-          className="side-page"
-          style={
-            pager.dragging
-              ? { transform: `translate3d(calc(100% + ${pager.offset}px), 0, 0)` }
-              : undefined
-          }
-          aria-hidden={pager.page === 0}
-        >
-          <SearchPanel active={pager.page === 1} onClose={pager.close} />
-        </div>
         {homeTabsOpen ? (
           <TabDeck onClose={() => setHomeTabsOpen(false)} />
         ) : null}
