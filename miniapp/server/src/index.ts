@@ -8,6 +8,7 @@ import { buildServer } from './app.js';
 import { loadConfig, loadOrCreateJwtSecret } from './config.js';
 import { MenuSync, Tunnel, defaultBinDir } from './tunnel.js';
 import { primeTailnetHost, tailnetHost } from './tailnet.js';
+import { buildPairServer } from './pair.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -29,6 +30,14 @@ async function main(): Promise<void> {
    */
   let externalUrl: string | null = null;
 
+  /*
+   * The pairing page gets its own port precisely because `tailscale serve`
+   * proxies exactly one. Anything on this port is unreachable from the
+   * tailnet without a second, deliberate `serve` rule -- which is the
+   * whole point, and the thing the old in-app IP check could not give us.
+   */
+  const pairPort = Number(process.env.MINIAPP_PAIR_PORT) || config.port + 1;
+
   const { app } = await buildServer(config, {
     webDist,
     jwtSecret,
@@ -36,6 +45,7 @@ async function main(): Promise<void> {
     publicUrl: () => tunnel?.url ?? externalUrl,
     version: process.env.MINIAPP_VERSION || '0.1.0',
     tailnetHost,
+    pairPort,
   });
 
   // Warmed at boot so the first hit on /pair does not wait on a subprocess.
@@ -49,6 +59,29 @@ async function main(): Promise<void> {
     { sessionsDir: config.sessionsDir, webDist },
     `aside mini app listening on http://${host}:${config.port}`,
   );
+
+  /*
+   * Hard-coded to loopback, not `MINIAPP_HOST`: this listener hands out a
+   * credential, so it must not follow the app onto a wider interface if
+   * someone widens that one.
+   */
+  const pairApp = buildPairServer({
+    jwtSecret,
+    appPort: config.port,
+    tailnetHost,
+    logger: false,
+  });
+  try {
+    await pairApp.listen({ port: pairPort, host: '127.0.0.1' });
+    app.log.info(`pairing page on http://127.0.0.1:${pairPort}/pair`);
+  } catch (err) {
+    // A busy pair port must not take the app down with it. Pairing is a
+    // once-per-device errand; the agent itself is the thing that has to
+    // stay up.
+    app.log.error(
+      `pairing listener failed to bind on ${pairPort}: ${(err as Error).message}`,
+    );
+  }
 
   let menu: MenuSync | null = null;
 
@@ -145,6 +178,7 @@ async function main(): Promise<void> {
     process.on(signal, () => {
       tunnel?.stop();
       menu?.stop();
+      void pairApp.close();
       app.close().then(
         () => process.exit(0),
         () => process.exit(1),

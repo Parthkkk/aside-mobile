@@ -23,7 +23,7 @@ well, it lives there.
 This is written to be executed top to bottom without questions. Give an
 agent the repo link and say:
 
-> Set up the standalone mobile app. Follow MOBILE.md top to bottom. Ask me
+> Set up the standalone mobile app. Follow the README top to bottom. Ask me
 > only when you need a password, my phone in my hand, or a decision.
 
 Every step says how to check it worked.
@@ -134,10 +134,16 @@ The phone needs the Mac awake and the server running.
 
 ## 5. Pair
 
-On the Mac, open <http://127.0.0.1:8790/pair>.
+On the Mac, open <http://127.0.0.1:8791/pair>.
 
-That page is bound to loopback, so a device already on your tailnet still
-cannot reach it. Pairing requires physical access to the Mac.
+Note the port: 8791, not 8790. The pairing page runs on its own listener,
+bound to loopback, and `tailscale serve` proxies only 8790. A device already
+on your tailnet cannot reach it. Pairing requires access to the Mac itself.
+
+(It lived on 8790 behind an IP check until an audit showed the check was
+meaningless: Tailscale terminates TLS and proxies to loopback, so every
+tailnet request presented as `127.0.0.1` and passed. Port 8790 now refuses
+`/pair` for everyone and points here.)
 
 It shows a QR code and a link. What happens next depends on the phone.
 
@@ -152,7 +158,7 @@ brew install --cask temurin@21
 brew install --cask android-commandlinetools
 export JAVA_HOME=$(/usr/libexec/java_home -v 21)
 export ANDROID_HOME=$HOME/Library/Android/sdk
-sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
 cd ~/aside-mobile
 ./build-android.sh
@@ -216,9 +222,12 @@ Mac built:
 shasum -a 256 ~/aside-mobile/miniapp/web/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-**What the app can actually do.** It asks for microphone (voice input),
-notifications (push when a task finishes), and internet. It has no contacts,
-location, camera, SMS or storage access. The code is in this repo; the
+**What the app can actually do.** It asks for microphone (voice input) and
+internet: those are the only two permissions in the manifest, alongside
+audio-mode control that the mic needs. Push (the alert when a task finishes)
+arrives through Web Push inside the browser engine, so it is a site
+permission you grant in the app, not a native Android one. It has no
+contacts, location, camera, SMS or storage access. The code is in this repo; the
 permissions are declared in
 `miniapp/web/android/app/src/main/AndroidManifest.xml` and you can read the
 whole list in a minute.
@@ -271,7 +280,7 @@ free Apple ID. The web app avoids all of that and costs nothing.
 2. **Share**, then **Add to Home Screen**, then **Add**.
 3. Open Aside from the home screen. Not from Safari.
 4. It asks to be paired. Copy the pairing link from
-   <http://127.0.0.1:8790/pair> on the Mac and paste it in. Universal
+   <http://127.0.0.1:8791/pair> on the Mac and paste it in. Universal
    Clipboard makes that a copy on one device and a paste on the other.
 
 **Step 3 matters, and step 4 is the consequence.** iOS gives a Safari tab
@@ -304,8 +313,10 @@ miniapp/
     android/ Native project; GeckoView lives in BrowserActivity.java
     scripts/ gen-splash.mjs regenerates the iOS launch screens
 build-android.sh   Builds and publishes the APK
-tailscale/         Certificate helpers
 ```
+
+Tailscale state (`tailscale/`, the tailscaled socket and logs) is created
+per-machine under `~/.aside-telegram-bridge/`. It is not part of this repo.
 
 ```bash
 cd miniapp/web && npx vitest run      # 198 tests
@@ -316,10 +327,16 @@ cd miniapp/server && npx vitest run   # 525 tests
 
 ## Security
 
-- Nothing listens on the public internet. The server binds loopback;
-  Tailscale is the only way in.
-- The pairing page is loopback-only, so tailnet access alone cannot pair a
-  device.
+- Nothing listens on the public internet. The server binds loopback by
+  default (`MINIAPP_HOST` can widen it: do not); Tailscale is the only way
+  in.
+- The pairing page is on a second listener, hardwired to loopback on 8791,
+  which `tailscale serve` does not proxy. Tailnet access alone cannot pair a
+  device. Do not add a `serve` rule for that port.
+- The APK that `build-android.sh` publishes to your tailnet carries a baked
+  pairing key so a fresh install self-pairs. On a solo tailnet that is fine.
+  If you ever share the tailnet, stop publishing it there: anyone who can
+  download the APK can read the key out of `assets/capacitor.config.json`.
 - The signing secret is per-install, `chmod 600`, outside the repo, and
   gitignored.
 - Sessions are JWTs with a cookie fallback, so an evicted browser store does
@@ -393,7 +410,7 @@ devices, that the Mac is awake, and that
 again and turn on Amphetamine.
 
 **Pairing rejected.** Keys are single-use. Reload
-<http://127.0.0.1:8790/pair>.
+<http://127.0.0.1:8791/pair>.
 
 **iPhone asks to pair every launch.** You are in a Safari tab. Install to
 the home screen, then pair inside the installed app.
