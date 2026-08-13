@@ -42,6 +42,34 @@ export function setAuthToken(token: string): void {
   authToken = token;
 }
 
+/*
+ * What to do when the server says our credential is no good.
+ *
+ * The boot path trusts a stored token on the strength of its own `exp`
+ * claim, which is decoded locally and never checked against a signature.
+ * That is fine for the case it was written for -- avoiding a spinner on
+ * every launch -- and wrong for a token the server has stopped accepting.
+ * Deleting the signing secret is the documented way to revoke a device, and
+ * it leaves every issued token unexpired and unverifiable at the same time.
+ * The phone would boot the full UI, get 401 on everything, swallow it, and
+ * show a working-looking app where the send button silently did nothing.
+ *
+ * A 401 is the only authority on whether a credential is alive, so handle it
+ * centrally and at any point in the session rather than only at boot.
+ */
+let onUnauthorized: (() => void) | null = null;
+
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  onUnauthorized = fn;
+}
+
+/*
+ * The two routes that mint a credential rather than spend one. A 401 from
+ * these means "wrong key", which the caller already reports; treating it as
+ * a dead session would wipe a good token when someone fat-fingers a paste.
+ */
+const CREDENTIAL_ROUTES = ['/api/pair', '/api/auth'];
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body) headers.set('content-type', 'application/json');
@@ -55,6 +83,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const text = await res.text();
   const body = text ? JSON.parse(text) : {};
   if (!res.ok) {
+    if (res.status === 401 && !CREDENTIAL_ROUTES.includes(path)) {
+      authToken = '';
+      onUnauthorized?.();
+    }
     throw new ApiError(res.status, body.reason || body.error || res.statusText);
   }
   return body as T;

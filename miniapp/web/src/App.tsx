@@ -26,8 +26,8 @@ import { ChevronLeft, Globe, PanelRight, Search, Spinner } from './components/Ic
 import { TabDeck } from './components/TabDeck';
 import { WatchModeCard } from './components/WatchMode';
 import type { CitationMark } from './utils/citations';
-import { api, setAuthToken } from './api';
-import { resolveStandaloneAuth } from './standalone';
+import { api, setAuthToken, setUnauthorizedHandler } from './api';
+import { clearStoredToken, resolveStandaloneAuth } from './standalone';
 import { PairPrompt } from './components/PairPrompt';
 import { InstallHint } from './components/InstallHint';
 import { useThread } from './hooks/useThread';
@@ -235,6 +235,24 @@ export default function App() {
       return off;
     }
 
+    /*
+     * A 401 anywhere means this device's credential is dead, whenever that
+     * happens. The commonest cause is the documented revocation path:
+     * deleting the signing secret on the Mac leaves every issued token
+     * unexpired but unverifiable, and the boot path trusts `exp` without
+     * checking a signature. Without this the phone renders the whole UI,
+     * fails every call, and shows nothing at all -- the send button just
+     * stops working. Drop the dead token and ask to be paired again.
+     */
+    setUnauthorizedHandler(() => {
+      clearStoredToken();
+      setAuth({
+        phase: 'failed',
+        reason:
+          'Your Mac no longer recognises this device. Paste a fresh pairing link from your Mac below.',
+      });
+    });
+
     // No initData: this is the installed app, opened from the home screen
     // rather than launched by Telegram. Same JWT spine, different front door.
     resolveStandaloneAuth().then((result) => {
@@ -253,7 +271,10 @@ export default function App() {
               : 'Not paired yet. Paste the pairing link from your Mac below.',
       });
     });
-    return off;
+    return () => {
+      off();
+      setUnauthorizedHandler(null);
+    };
   }, [runBiometricGate]);
 
   // --- data ---------------------------------------------------------------
