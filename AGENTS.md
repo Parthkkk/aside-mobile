@@ -44,7 +44,11 @@ grep -q '/opt/homebrew/bin' ~/.zshrc || echo 'export PATH="/opt/homebrew/bin:$PA
 brew install node
 ```
 
-**Check:** `node --version` prints v20 or newer.
+**Check:** `node --version` prints **v22.5 or newer**. This is a hard floor,
+not a preference: browser history and the session state cache read Chrome's
+SQLite through `node:sqlite`, added in 22.5, and both imports are inside a
+try/catch. An older Node boots and then silently has no history and no
+search, so nothing will look broken while half the app does nothing.
 
 ## 2. Install and build
 
@@ -213,6 +217,7 @@ one. If the tailnet has other people on it, do not publish the APK there.
 | Phone says "can't reach your Mac" | Mac asleep, or server stopped | wake it, `npm start`, consider `npm run launchd` |
 | iPhone asks to pair every launch | running in a Safari tab | install to the home screen first |
 | `npm install` killed in esbuild | macOS quarantine | `xattr -dr com.apple.quarantine node_modules` |
+| History and search return nothing, no error | Node older than 22.5 | `brew install node`, then rebuild and restart |
 | Gradle "failed to find target android-36" | SDK 35 installed | `sdkmanager "platforms;android-36" "build-tools;36.0.0"` |
 
 ## What you are allowed to change

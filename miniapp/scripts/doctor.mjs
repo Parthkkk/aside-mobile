@@ -77,9 +77,20 @@ async function httpRaw(url, timeoutMs = 4000) {
 // --- 1. toolchain ---------------------------------------------------------
 section('Toolchain');
 
-const major = Number(process.versions.node.split('.')[0]);
-if (major >= 20) ok('node', process.version);
-else bad(`node ${process.version} is too old`, 'brew install node  (need v20+)');
+/*
+ * 22.5 is where `node:sqlite` landed, and browser history and the session
+ * state cache both read Chrome's SQLite directly. Both imports are inside a
+ * try/catch, so an older Node boots fine and then quietly has no history
+ * and no state cache -- a silent half-working install, which is worse than
+ * refusing to start. This used to say 20.
+ */
+const [major, minor] = process.versions.node.split('.').map(Number);
+if (major > 22 || (major === 22 && minor >= 5)) ok('node', process.version);
+else
+  bad(
+    `node ${process.version} is too old for node:sqlite`,
+    'brew install node  (need v22.5+; history and search silently do nothing below it)',
+  );
 
 if (fs.existsSync(path.join(miniapp, 'node_modules'))) ok('dependencies installed');
 else bad('dependencies are not installed', 'cd miniapp && npm install');
@@ -188,17 +199,54 @@ const tsCandidates = [
   '/usr/local/bin/tailscale',
   '/opt/homebrew/bin/tailscale',
 ];
-const ts = tsCandidates.find((p) => fs.existsSync(p));
-if (!ts) {
-  warn('Tailscale not found', 'brew install --cask tailscale, then sign in on the Mac and the phone');
-} else {
-  try {
-    const status = JSON.parse(sh(ts, ['status', '--json']));
-    tailnetHost = String(status?.Self?.DNSName || '').replace(/\.$/, '');
-    if (tailnetHost) ok('tailnet hostname', tailnetHost);
-    else warn('Tailscale is installed but this Mac has no hostname yet', 'sign in: open -a Tailscale');
+/*
+ * A machine can have more than one Tailscale CLI and more than one daemon,
+ * and the wrong pairing simply errors. Some installs run a userspace
+ * tailscaled on a socket of their own, which the CLI will not find unless
+ * it is told, and the App Store binary cannot drive a Homebrew daemon at
+ * all. Picking the first binary on disk and hoping reported "could not read
+ * Tailscale status" on a machine whose tailnet was working perfectly.
+ *
+ * So try the combinations and keep the first that answers, rather than
+ * guessing which one is real.
+ */
+const sockCandidates = [
+  path.join(os.homedir(), '.aside-mobile/tailscale/ts.sock'),
+  path.join(os.homedir(), '.aside-telegram-bridge/tailscale/ts.sock'),
+];
+const socks = [...sockCandidates.filter((p) => fs.existsSync(p)), null];
 
-    const serve = sh(ts, ['serve', 'status']);
+let ts = null;
+let tsArgs = [];
+let status = null;
+for (const bin of tsCandidates.filter((p) => fs.existsSync(p))) {
+  for (const sock of socks) {
+    const args = sock ? ['--socket', sock] : [];
+    try {
+      const parsed = JSON.parse(sh(bin, [...args, 'status', '--json']));
+      if (!parsed?.Self) continue;
+      ts = bin;
+      tsArgs = args;
+      status = parsed;
+      break;
+    } catch {
+      // Wrong binary for this daemon, or no daemon on that socket.
+    }
+  }
+  if (status) break;
+}
+
+if (!tsCandidates.some((p) => fs.existsSync(p))) {
+  warn('Tailscale not found', 'brew install --cask tailscale, then sign in on the Mac and the phone');
+} else if (!status) {
+  warn('could not read Tailscale status', 'is the daemon running? open -a Tailscale');
+} else {
+  tailnetHost = String(status?.Self?.DNSName || '').replace(/\.$/, '');
+  if (tailnetHost) ok('tailnet hostname', tailnetHost);
+  else warn('Tailscale is installed but this Mac has no hostname yet', 'sign in: open -a Tailscale');
+
+  try {
+    const serve = sh(ts, [...tsArgs, 'serve', 'status']);
     if (serve.includes(String(port))) ok(`tailscale serve points at ${port}`);
     else bad('tailscale serve is not pointing at this server', `${ts} serve --bg ${port}`);
     if (serve.includes(String(pairPort))) {
@@ -208,7 +256,7 @@ if (!ts) {
       );
     }
   } catch {
-    warn('could not read Tailscale status', 'is the daemon running? open -a Tailscale');
+    warn('could not read the tailscale serve config', `${ts} serve status`);
   }
 }
 

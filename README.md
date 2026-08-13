@@ -56,8 +56,14 @@ which brew || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homeb
 export PATH="/opt/homebrew/bin:$PATH"
 echo 'export PATH="/opt/homebrew/bin:$PATH"' >> ~/.zshrc
 brew install node
-node --version   # v20 or newer
+node --version   # v22.5 or newer
 ```
+
+**v22.5 is a real floor, not a suggestion.** Browser history and the session
+state cache read Chrome's SQLite through `node:sqlite`, which landed in
+22.5. Both imports are wrapped in a try/catch, so an older Node starts
+normally and then quietly has no history and no search. Nothing errors; the
+feature is just gone.
 
 Apple Silicon puts Homebrew in `/opt/homebrew`, which is not on the default
 `PATH`, which is why that line is there.
@@ -365,10 +371,10 @@ cd miniapp && npm run typecheck       # both workspaces
 cd miniapp && npm run doctor          # verifies a real install end to end
 ```
 
-GitHub Actions runs the tests, the typecheck and both builds on node 20 and
-22 for every push and pull request, plus two guards that caught real
-regressions before: no committed `/Users/...` paths, and no writes into the
-Telegram bridge's directory.
+GitHub Actions runs the tests, the typecheck and both builds on node 22 and
+24 for every push and pull request, plus two guards for regressions that
+have already happened once each: no committed home-directory paths, and no
+writes into the Telegram bridge's directory.
 
 ---
 

@@ -18,9 +18,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 20 is the floor in package.json engines. 22 is what a fresh
-        # `brew install node` gives someone today, so both have to pass.
-        node: ['20', '22']
+        # 22.5 is the floor: `node:sqlite` landed there and both the browser
+        # history reader and the session state cache need it. 24 is what a
+        # fresh `brew install node` gives someone today.
+        node: ['22', '24']
 
     steps:
       - uses: actions/checkout@v4
@@ -65,10 +66,18 @@ jobs:
       #
       # `git ls-files` rather than `grep -r`, so Gradle intermediates and
       # node_modules cannot fail the job with paths nobody committed.
+      #
+      # The needle is assembled at runtime and this directory is excluded,
+      # because otherwise the check matches itself and fails every run.
       - name: No machine-specific paths
         run: |
-          if git ls-files -z | xargs -0 grep -lI "/Users/parth" ; then
-            echo "::error::hardcoded /Users/parth path"
+          NEEDLE="/Users/""parth"
+          HITS=$(git ls-files -z \
+            | grep -zv '^\.github/workflows/' \
+            | xargs -0 grep -lIF "$NEEDLE" || true)
+          if [ -n "$HITS" ]; then
+            echo "$HITS"
+            echo "::error::hardcoded home-directory path"
             exit 1
           fi
 
