@@ -103,6 +103,11 @@ const EFFORT_KEY = 'miniapp.effort';
  * whole enum -- it validates against exactly this list -- so there is
  * nothing to discover and no risk of showing a mode that does not exist.
  */
+/** Horizontal travel before a swipe across the home screen is read as intent. */
+const SWIPE_CLAIM_PX = 14;
+/** How much horizontal must beat vertical to count as a sideways gesture. */
+const SWIPE_DOMINANCE = 1.4;
+
 const FALLBACK_PERMISSION_MENU = [
   { id: 'read-only', label: 'Read only' },
   { id: 'guard', label: 'Guard' },
@@ -165,6 +170,57 @@ export default function App() {
    * guess without looking.
    */
   const [composerMode, setComposerMode] = useState<ComposerMode>('chat');
+
+  /*
+   * Swipe anywhere on the home screen to flip chat/web, on top of the
+   * pill switch in the top bar. The pill is discovery, this is speed for
+   * a thumb that already knows where it is going -- same idea as the old
+   * side-page pager, but a screen-wide gesture instead of one scoped to
+   * the composer, so it fires no matter where on the screen the swipe
+   * starts.
+   *
+   * Right goes to web, left goes back to chat. Claim/dominance thresholds
+   * match what the composer's own version and the old pager used, so a
+   * vertical scroll (the home screen's Recents reveal) is never stolen:
+   * the gesture is only read as horizontal once travel is unambiguous,
+   * and a touch resolved vertical can never flip back.
+   */
+  const swipe = useRef({ x: 0, y: 0, resolved: '' as '' | 'x' | 'y' });
+
+  const onHomeTouchStart = useCallback((e: React.TouchEvent) => {
+    const t = e.touches[0];
+    swipe.current = { x: t.clientX, y: t.clientY, resolved: '' };
+  }, []);
+
+  const onHomeTouchMove = useCallback(
+    (e: React.TouchEvent) => {
+      if (swipe.current.resolved) return;
+      const t = e.touches[0];
+      const dx = t.clientX - swipe.current.x;
+      const dy = t.clientY - swipe.current.y;
+      if (Math.abs(dy) > SWIPE_CLAIM_PX && Math.abs(dy) > Math.abs(dx)) {
+        swipe.current.resolved = 'y';
+        return;
+      }
+      if (
+        Math.abs(dx) > SWIPE_CLAIM_PX &&
+        Math.abs(dx) > Math.abs(dy) * SWIPE_DOMINANCE
+      ) {
+        swipe.current.resolved = 'x';
+        const next: ComposerMode = dx > 0 ? 'search' : 'chat';
+        setComposerMode((prev) => {
+          if (prev === next) return prev;
+          haptic(next === 'search' ? 'light' : 'soft');
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  const onHomeTouchEnd = useCallback(() => {
+    swipe.current.resolved = '';
+  }, []);
 
   const omnibox = useOmnibox(
     draft,
@@ -612,6 +668,10 @@ export default function App() {
       <div
         className={`app app-home${composerMode === 'search' ? ' mode-web' : ''}`}
         ref={homeShell}
+        onTouchStart={onHomeTouchStart}
+        onTouchMove={onHomeTouchMove}
+        onTouchEnd={onHomeTouchEnd}
+        onTouchCancel={onHomeTouchEnd}
       >
         {/*
           Home screen only. It refers to Safari's Share button, so it
@@ -699,7 +759,6 @@ export default function App() {
             busy={sending}
             disabled={sending}
             mode={composerMode}
-            onModeChange={setComposerMode}
             above={
               composerMode === 'search' ? (
                 <OmniboxResults

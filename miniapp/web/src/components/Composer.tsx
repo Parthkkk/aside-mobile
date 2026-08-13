@@ -109,17 +109,15 @@ export interface ComposerProps {
    * Both jobs are "put words in a box and go somewhere", so they differ in
    * destination and not in gesture, which is what a segmented control is
    * for. Absent on the reply composer, which has only one destination.
+   *
+   * The switch itself (top-bar pill, home-screen swipe) lives above this
+   * component now; this only reads the current mode to adjust its own
+   * furniture (placeholder, autocorrect, which buttons show).
    */
   mode?: ComposerMode;
-  onModeChange?: (mode: ComposerMode) => void;
 }
 
 export type ComposerMode = 'chat' | 'search';
-
-/** Horizontal travel before a drag across the composer is read as intent. */
-const SWIPE_CLAIM_PX = 14;
-/** How much horizontal must beat vertical to count as a sideways gesture. */
-const SWIPE_DOMINANCE = 1.4;
 
 /** The `✳ Fable 5 ∨` / `High ∨` triggers from the bottom bar. */
 export function Pill({
@@ -265,7 +263,6 @@ export function Composer({
   context,
   above,
   mode,
-  onModeChange,
 }: ComposerProps) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -318,25 +315,13 @@ export function Composer({
   };
 
   /*
-   * Swipe across the composer to flip the mode.
-   *
-   * The toggle is the affordance; this is the fast path for a thumb that
-   * already knows where it is going, and it keeps the direct-manipulation
-   * feel the swipe-to-search page had before this replaced it.
-   *
-   * The claim rules are the ones `useSidePager` used, for the same reason:
-   * this surface also owns a vertical axis (the textarea scrolls once it
-   * has grown) and a horizontal one (text selection). A gesture is only
-   * taken once travel is unambiguous, and one resolved as vertical can
-   * never be reinterpreted later, which is what stops a diagonal drag from
-   * flipping the mode halfway through a scroll.
-   */
-  const swipe = useRef({ x: 0, y: 0, resolved: '' as '' | 'x' | 'y' });
-
-  const canSwitch = Boolean(mode && onModeChange);
-
-  /*
    * Entering web mode puts the caret in the box.
+   *
+   * The swipe gesture itself now lives on the home screen shell (App.tsx),
+   * not here -- it covers the whole screen instead of just this dock, so a
+   * swipe anywhere flips the mode, not only one that starts on the
+   * composer. This effect only reacts to the mode once something else has
+   * already changed it.
    *
    * Otherwise switching costs two taps to do one thing. The keyboard comes
    * up with it, which is correct here: suggestions are docked directly
@@ -355,45 +340,9 @@ export function Composer({
     if (mode !== 'search') wasSearch.current = false;
   }, [mode]);
 
-  const onTouchStart = (e: React.TouchEvent) => {
-    if (!canSwitch) return;
-    const t = e.touches[0];
-    swipe.current = { x: t.clientX, y: t.clientY, resolved: '' };
-  };
-
-  const onTouchMove = (e: React.TouchEvent) => {
-    if (!canSwitch || swipe.current.resolved) return;
-    const t = e.touches[0];
-    const dx = t.clientX - swipe.current.x;
-    const dy = t.clientY - swipe.current.y;
-    if (Math.abs(dy) > SWIPE_CLAIM_PX && Math.abs(dy) > Math.abs(dx)) {
-      swipe.current.resolved = 'y';
-      return;
-    }
-    if (
-      Math.abs(dx) > SWIPE_CLAIM_PX &&
-      Math.abs(dx) > Math.abs(dy) * SWIPE_DOMINANCE
-    ) {
-      swipe.current.resolved = 'x';
-      const next: ComposerMode = dx < 0 ? 'search' : 'chat';
-      if (next !== mode) {
-        haptic('light');
-        onModeChange?.(next);
-      }
-    }
-  };
-
-  const onTouchEnd = () => {
-    swipe.current.resolved = '';
-  };
-
   return (
     <div
       className={`composer composer-${variant}${mode === 'search' ? ' composer-search' : ''}`}
-      onTouchStart={onTouchStart}
-      onTouchMove={onTouchMove}
-      onTouchEnd={onTouchEnd}
-      onTouchCancel={onTouchEnd}
     >
       {/* The task list sits ON TOP of the composer, as in the desktop app. */}
       {above}
