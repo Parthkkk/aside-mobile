@@ -2215,7 +2215,26 @@ export async function buildServer(
      * static plugin answers `/` with the raw `index.html` and there is no
      * way to register a route that gets there first.
      */
-    await app.register(fastifyStatic, { root: opts.webDist, index: false });
+    await app.register(fastifyStatic, {
+      root: opts.webDist,
+      index: false,
+      /*
+       * The APK has no Content-Disposition without this, and mobile Chrome
+       * is inconsistent about turning a bare `application/vnd.android.
+       * package-archive` response into an actual file-manager download
+       * without one -- it can just sit there looking like nothing
+       * happened. Everything else served from here is meant to be
+       * navigated to, not saved, so this only touches the one file.
+       */
+      setHeaders: (reply, filePath) => {
+        if (filePath.endsWith('.apk')) {
+          reply.header(
+            'Content-Disposition',
+            `attachment; filename="${path.basename(filePath)}"`,
+          );
+        }
+      },
+    });
 
     /**
      * Standalone entry for the installed app.
