@@ -540,6 +540,60 @@ export async function buildServer(
     })();
   });
 
+  /*
+   * Security headers on every response.
+   *
+   * Set in an `onSend` hook rather than per route so a route added later
+   * cannot forget them, and skipped when a route has already set its own
+   * `content-security-policy` -- the artifact and local-file routes serve
+   * attacker-influenced bytes under a much stricter `sandbox` policy, and
+   * this must not loosen it.
+   *
+   * `frame-ancestors` is the interesting one. `'none'` is right for a
+   * standalone install, but Telegram Web runs a mini app inside an iframe
+   * on `web.telegram.org`, so a blanket `'none'` would break the very mode
+   * this project started in. The allowance is therefore tied to whether
+   * Telegram is configured at all.
+   */
+  const frameAncestors = config.standalone
+    ? "'none'"
+    : "'self' https://web.telegram.org https://*.telegram.org";
+  const contentSecurityPolicy = [
+    "default-src 'self'",
+    // telegram.org hosts the WebApp bridge script that `/` loads. `/app`
+    // strips that tag, but the same server answers both.
+    "script-src 'self' https://telegram.org",
+    // Shiki writes per-token colours as inline styles, and React sets
+    // style attributes, both of which this blocks without 'unsafe-inline'.
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "media-src 'self' blob:",
+    "font-src 'self' data:",
+    // Same-origin REST plus the WebSocket on the same host.
+    "connect-src 'self' ws: wss:",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    `frame-ancestors ${frameAncestors}`,
+  ].join('; ');
+
+  app.addHook('onSend', async (_request, reply, payload) => {
+    if (!reply.getHeader('content-security-policy')) {
+      reply.header('content-security-policy', contentSecurityPolicy);
+    }
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('referrer-policy', 'no-referrer');
+    /*
+     * HSTS. Browsers ignore this over plain http, so sending it on the
+     * loopback listener costs nothing; over the tailnet, where Tailscale
+     * terminates real TLS, it is the one that matters. No `preload`: this
+     * hostname is private and does not belong in a browser's preload list.
+     */
+    reply.header('strict-transport-security', 'max-age=31536000');
+    return payload;
+  });
+
   await app.register(rateLimit, {
     global: true,
     max: 120,
@@ -567,10 +621,28 @@ export async function buildServer(
    * what carries the truth; falling back to the request protocol keeps
    * local testing over 127.0.0.1 working.
    */
+  /**
+   * Should the session cookie carry `Secure`?
+   *
+   * `X-Forwarded-Proto` is the only way to know, because Tailscale
+   * terminates TLS and forwards plain http to loopback, so `request.protocol`
+   * says `http` for a request the phone made over https.
+   *
+   * The header is trusted ONLY from a loopback peer. That is not a
+   * formality: `trustProxy` is off precisely because headers are
+   * client-writable, and the same reasoning has to apply here. A loopback
+   * peer is either our own reverse proxy or a client on this machine, and a
+   * client on this machine can only mislead itself about its own cookie.
+   */
   const wantsSecureCookie = (request: FastifyRequest): boolean => {
-    const fwd = request.headers['x-forwarded-proto'];
-    const proto = Array.isArray(fwd) ? fwd[0] : fwd;
-    if (proto) return String(proto).split(',')[0].trim() === 'https';
+    const peer = String(request.ip || '');
+    const fromLoopback =
+      peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
+    if (fromLoopback) {
+      const fwd = request.headers['x-forwarded-proto'];
+      const proto = Array.isArray(fwd) ? fwd[0] : fwd;
+      if (proto) return String(proto).split(',')[0].trim() === 'https';
+    }
     return request.protocol === 'https';
   };
 

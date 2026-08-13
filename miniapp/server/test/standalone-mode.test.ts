@@ -103,6 +103,14 @@ describe('a clone with no config file', () => {
     expect(authed.statusCode).toBe(200);
   });
 
+  it('refuses framing outright, since no Telegram means no iframe host', async () => {
+    await boot();
+    const res = await app.inject({ method: 'GET', url: '/api/health' });
+    expect(String(res.headers['content-security-policy'])).toContain(
+      "frame-ancestors 'none'",
+    );
+  });
+
   it('rejects a wrong pairing key', async () => {
     await boot();
     const res = await app.inject({

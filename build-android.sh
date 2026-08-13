@@ -120,15 +120,38 @@ echo "==> baking the pairing key into the shell"
 # because the server is tailnet-only: holding this file is useless without
 # also being on Parth's tailnet. Do not post the APK anywhere public.
 #
-SECRET_FILE="${ASIDE_SECRET_FILE:-$HOME/.aside-telegram-bridge/miniapp-secret.json}"
+#
+# The secret has two possible homes and the server decides which, so this
+# has to agree with it rather than guess. A standalone install (no Telegram
+# config) keeps state in ~/.aside-mobile; an install that also runs the
+# Telegram bridge keeps it next to the bridge's own config. Checking both,
+# in the order the server resolves them, is what stops a self-pairing APK
+# from being built against a secret the server does not use -- which would
+# produce an APK that launches and then silently fails to pair.
+#
+if [ -n "${ASIDE_SECRET_FILE:-}" ]; then
+  SECRET_FILE="$ASIDE_SECRET_FILE"
+else
+  SECRET_FILE=""
+  for candidate in \
+    "$HOME/.aside-mobile/miniapp-secret.json" \
+    "$HOME/.aside-telegram-bridge/miniapp-secret.json"
+  do
+    if [ -f "$candidate" ]; then SECRET_FILE="$candidate"; break; fi
+  done
+  # Nothing on disk yet: name the standalone path so the message below is
+  # about the file the server will actually create on first start.
+  SECRET_FILE="${SECRET_FILE:-$HOME/.aside-mobile/miniapp-secret.json}"
+fi
 ASSET_CFG="$WEB/android/app/src/main/assets/capacitor.config.json"
 if [ ! -f "$SECRET_FILE" ]; then
   # A clone on a machine that has never run the server has no secret to
   # derive from. That is not a build failure: the APK is still valid, it
   # just launches unpaired, and the phone pairs by opening the pairing
   # link once. Carrying on beats exiting under `set -e`.
-  echo "  no signing secret at $SECRET_FILE -- skipping."
-  echo "  the app will launch unpaired; pair it once from the pairing page."
+  echo "  no signing secret at $SECRET_FILE, skipping."
+  echo "  start the server once to generate it, or pair the app by hand"
+  echo "  from http://127.0.0.1:$((${MINIAPP_PORT:-8790} + 1))/pair"
 else
   # The key is passed through the environment rather than argv: argv is
   # world-readable in `ps` for as long as python runs.

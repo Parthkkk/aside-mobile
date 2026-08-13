@@ -16,7 +16,7 @@
     "@fastify/rate-limit": "^10.2.2",
     "@fastify/static": "^10.1.2",
     "@telegram-apps/init-data-node": "^2.0.10",
-    "fastify": "^5.2.1",
+    "fastify": "^5.11.3",
     "jsonwebtoken": "^9.0.2",
     "qrcode": "^1.5.4",
     "ws": "^8.18.0"

@@ -351,7 +351,7 @@ per-machine under `~/.aside-telegram-bridge/`. It is not part of this repo.
 
 ```bash
 cd miniapp/web && npx vitest run      # 198 tests
-cd miniapp/server && npx vitest run   # 539 tests
+cd miniapp/server && npx vitest run   # 544 tests
 cd miniapp && npm run doctor          # verifies a real install end to end
 ```
 
@@ -376,6 +376,31 @@ cd miniapp && npm run doctor          # verifies a real install end to end
   way in.
 - The signing secret is per-install, `chmod 600`, outside the repo, and
   gitignored.
+- **The pairing key is not one-time.** It is `sha256(secret + tag)`, so the
+  pairing page shows the same key every time and it stays valid until the
+  secret changes. Treat the link like a password: anyone holding it who is
+  also on your tailnet can mint a 90-day session.
+- Rate limits are keyed on the socket address, never on a header, which is
+  the only key a client cannot choose. Behind a proxy that means every
+  request shares one bucket, so a client hammering `/api/pair` spends the
+  limit for everyone including you. That is the right trade for a
+  single-owner server: the alternative is trusting `X-Forwarded-For`, which
+  makes the limits meaningless. Worth knowing if you ever put this behind a
+  public tunnel rather than a tailnet.
+
+### Rotating the key
+
+There is no rotate command; there is a file.
+
+```bash
+rm ~/.aside-mobile/miniapp-secret.json    # or the bridge path, if you use it
+# restart the server, then re-pair each device
+```
+
+The secret is also the JWT signing key, so deleting it invalidates every
+session token at the same time. Every paired phone will ask to pair again,
+and an APK built with a baked key needs rebuilding with `./build-android.sh`.
+Do this if a pairing link ever leaves your control.
 - Sessions are JWTs with a cookie fallback, so an evicted browser store does
   not force re-pairing.
 - No Anthropic credentials live here. It talks to the Aside daemon already
@@ -446,8 +471,11 @@ devices, that the Mac is awake, and that
 **"Can't reach your Mac."** Server stopped or the Mac slept. `npm start`
 again and turn on Amphetamine.
 
-**Pairing rejected.** Keys are single-use. Reload
-<http://127.0.0.1:8791/pair>.
+**Pairing rejected.** The key is derived from the signing secret, so the
+page shows the same one every time and a mistyped or truncated paste is the
+usual cause. Reload <http://127.0.0.1:8791/pair> and copy the whole link.
+If it still fails, the server was restarted against a different secret file;
+check the path the doctor prints.
 
 **iPhone asks to pair every launch.** You are in a Safari tab. Install to
 the home screen, then pair inside the installed app.

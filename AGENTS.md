@@ -192,7 +192,8 @@ cd ~/aside-mobile
 **Check:** the script prints the APK path and its size, roughly 99MB.
 
 The APK it publishes to the tailnet carries a baked pairing key so a fresh
-install self-pairs. That is fine on a personal tailnet and wrong on a shared
+install self-pairs. That key is derived from the signing secret and does not
+rotate, so the APK stays a working credential for as long as the secret does. That is fine on a personal tailnet and wrong on a shared
 one. If the tailnet has other people on it, do not publish the APK there.
 
 ## Troubleshooting

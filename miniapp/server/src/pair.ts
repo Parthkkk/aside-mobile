@@ -106,8 +106,9 @@ export function buildPairServer(opts: PairServerOptions): FastifyInstance {
     <li>Launch it from the icon from now on.</li>
   </ol>
   <p class="warn">This link is a key to your Mac. Anyone who has it and is on
-  your tailnet can use your agent. Reload this page to see it again; it does
-  not expire on its own.</p>
+  your tailnet can use your agent. It is the same key every time and it does
+  not expire on its own: to revoke it, delete the signing secret and restart
+  the server.</p>
 </div>`);
   });
 

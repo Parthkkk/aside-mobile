@@ -58,10 +58,18 @@ function loadJson<T>(file: string, fallback: T): T {
   }
 }
 
-/** Same atomic-write shape as bridge.py's own `save_json`: tmp file, then rename. */
+/**
+ * Same atomic-write shape as bridge.py's own `save_json`: tmp file, then
+ * rename.
+ *
+ * 0600 on the temp file, which is the one that matters: `rename` keeps the
+ * mode of the file being renamed, so writing the temp world-readable and
+ * fixing it afterwards would leave a window where it was not. This file
+ * holds chat ids, message ids and session titles.
+ */
 function saveJsonAtomic(file: string, data: unknown): void {
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 1));
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 1), { mode: 0o600 });
   fs.renameSync(tmp, file);
 }
 
@@ -397,7 +405,15 @@ export class Notifier {
       await this.call('editMessageText', {
         chat_id: this.opts.chatId,
         message_id: record.messageId,
-        text: resolvedText,
+        /*
+         * Escaped, because this is `parse_mode: 'HTML'` and the text is not
+         * ours. Callers pass a question header and the option that was
+         * tapped, both of which come from model output. An unbalanced `<`
+         * in either one makes Telegram reject the edit outright, so the
+         * message stays stuck showing buttons for a question that has
+         * already been answered.
+         */
+        text: escapeHtml(resolvedText),
         parse_mode: 'HTML',
       });
     } catch (err) {
