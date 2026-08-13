@@ -72,7 +72,13 @@ interface ThreadScreenState {
 type AuthState =
   | { phase: 'pending' }
   | { phase: 'ready'; name?: string }
-  | { phase: 'failed'; reason: string }
+  /**
+   * `retryable` is set when a plain retry can help -- the Mac was
+   * unreachable, not refusing the credential. A rejected key or a revoked
+   * device needs a new pairing link, which a retry cannot conjure, so no
+   * retry button is offered for those.
+   */
+  | { phase: 'failed'; reason: string; retryable?: boolean }
   /** The bearer token is minted; a biometric check the owner turned on failed or was cancelled. Recoverable -- see `retryUnlock`, never a dead end. */
   | { phase: 'locked'; name?: string };
 
@@ -303,6 +309,19 @@ export default function App() {
   }, []);
 
   // --- auth ---------------------------------------------------------------
+  /*
+   * Retrying the unreachable-Mac case re-runs the boot resolution. The
+   * nonce lives in the effect dependency list so bumping it is the whole
+   * retry: the owner fixes Tailscale / starts the server, taps Try again,
+   * and the app asks again without a relaunch. `phase` is dropped back to
+   * pending first so the spinner shows while the second attempt runs.
+   */
+  const [authNonce, setAuthNonce] = useState(0);
+  const retryAuth = useCallback(() => {
+    setAuth({ phase: 'pending' });
+    setAuthNonce((n) => n + 1);
+  }, []);
+
   useEffect(() => {
     initTelegram();
     applyTheme();
@@ -358,11 +377,12 @@ export default function App() {
       }
       setAuth({
         phase: 'failed',
+        retryable: result.reason === 'unreachable',
         reason:
           result.reason === 'pair_rejected'
             ? 'That pairing link is no longer valid. Generate a new one on your Mac and paste it below.'
             : result.reason === 'unreachable'
-              ? "Can't reach your Mac. Make sure it's awake and Amphetamine is on."
+              ? "Can't reach your Mac. Check that Tailscale is connected on this phone and that the server is running on your Mac."
               : 'Not paired yet. Paste the pairing link from your Mac below.',
       });
     });
@@ -370,7 +390,7 @@ export default function App() {
       off();
       setUnauthorizedHandler(null);
     };
-  }, [runBiometricGate]);
+  }, [runBiometricGate, authNonce]);
 
   // --- data ---------------------------------------------------------------
   const loadSessions = useCallback(async () => {
@@ -573,6 +593,18 @@ export default function App() {
       <div className="boot">
         <p className="boot-title">Can’t sign in</p>
         <p className="boot-reason">{auth.reason}</p>
+        {auth.retryable ? (
+          <button
+            type="button"
+            className="boot-retry"
+            onClick={() => {
+              haptic('light');
+              retryAuth();
+            }}
+          >
+            Try again
+          </button>
+        ) : null}
         {/*
           Offered on every failure, not only the unpaired one. A rejected
           key and an unreachable Mac both leave the owner holding a link

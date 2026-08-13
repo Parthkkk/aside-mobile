@@ -105,10 +105,11 @@ export const api = {
    * Same JWT spine as `auth`, different front door: there is no Telegram to
    * hand us an initData blob when the app was opened from the home screen.
    */
-  pair: (key: string) =>
+  pair: (key: string, signal?: AbortSignal) =>
     request<{ token: string; name?: string; expiresIn: number }>('/api/pair', {
       method: 'POST',
       body: JSON.stringify({ key }),
+      signal,
     }),
 
   /**
@@ -118,9 +119,10 @@ export const api = {
    * is the genuine "never paired, or paired too long ago" case; anything
    * else means the token survived and the owner is not asked to re-pair.
    */
-  session: () =>
+  session: (signal?: AbortSignal) =>
     request<{ token: string; name?: string; expiresIn: number }>(
       '/api/session',
+      { signal },
     ),
 
   /**

@@ -51,7 +51,7 @@ export function PairPrompt({
       setError(
         status === 401
           ? 'That key was rejected. Generate a fresh one on your Mac.'
-          : "Couldn't reach your Mac. Check it's awake and on the same tailnet.",
+          : "Couldn't reach your Mac. Check that Tailscale is connected on both devices and the server is running on your Mac.",
       );
       setBusy(false);
     }

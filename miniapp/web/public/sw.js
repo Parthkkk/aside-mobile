@@ -164,8 +164,9 @@ self.addEventListener('fetch', (event) => {
              display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;text-align:center}
              div{max-width:22rem;padding:2rem}p{opacity:.7}</style>
              <div><h1>Can't reach your Mac</h1>
-             <p>Aside runs on your MacBook, so it needs to be awake and on the network.
-             Check that Amphetamine is on if the lid is shut.</p></div>`,
+             <p>Aside runs on your Mac, so it needs to be awake and on the tailnet.
+             Check that Tailscale is connected on both devices and the Aside
+             server is running on your Mac.</p></div>`,
             { headers: { 'content-type': 'text/html; charset=utf-8' }, status: 503 },
           );
         }

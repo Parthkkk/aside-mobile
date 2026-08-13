@@ -47,7 +47,7 @@ export function threadErrorText(error: unknown): string {
   }
   // A network failure surfaces as a bare TypeError from fetch.
   if (/failed to fetch|networkerror|load failed/i.test(raw)) {
-    return 'Cannot reach your Mac. Check that it is awake and online.';
+    return 'Cannot reach your Mac. Check that Tailscale is connected and the server is running on your Mac.';
   }
   return reason || 'Something went wrong loading this chat.';
 }

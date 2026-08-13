@@ -139,6 +139,27 @@ export type StandaloneAuth =
   | { ok: false; reason: 'needs_pairing' | 'pair_rejected' | 'unreachable' };
 
 /**
+ * How long the boot path will wait on the Mac before declaring it
+ * unreachable.
+ *
+ * The calls this guards (`/api/pair` and `/api/session`) are the only
+ * network the app makes before it can paint. Left unbounded, an
+ * unreachable Mac -- Tailscale dropped, the server stopped, the Mac on a
+ * different network -- leaves `fetch` hanging for what can be minutes on a
+ * phone, and the app sits frozen on its boot spinner with nothing to say.
+ * A reachable Mac answers in well under a second; twelve seconds is enough
+ * headroom for a machine waking from sleep without reading as a hang.
+ */
+const BOOT_TIMEOUT_MS = 12_000;
+
+/** An abort signal that fires after BOOT_TIMEOUT_MS; `clear` cancels it. */
+function bootSignal(): { signal: AbortSignal; clear: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BOOT_TIMEOUT_MS);
+  return { signal: controller.signal, clear: () => clearTimeout(timer) };
+}
+
+/**
  * Resolve a usable bearer token for a standalone launch.
  *
  * Order matters: a pairing key in the URL wins over a stored token, so
@@ -150,13 +171,16 @@ export async function resolveStandaloneAuth(): Promise<StandaloneAuth> {
 
   const key = readPairingKey();
   if (key) {
+    const timer = bootSignal();
     try {
-      const res = await api.pair(key);
+      const res = await api.pair(key, timer.signal);
+      timer.clear();
       storeToken(res.token);
       if (res.name) storeName(res.name);
       scrubPairingKey();
       return { ok: true, token: res.token, paired: true, name: res.name };
     } catch (err) {
+      timer.clear();
       scrubPairingKey();
       const status = (err as { status?: number }).status;
       // A 401 is a wrong key. Anything else means the Mac did not answer,
@@ -184,10 +208,13 @@ export async function resolveStandaloneAuth(): Promise<StandaloneAuth> {
    * be evicted, written by a different browser, or never have existed on
    * this profile, and none of that touches the cookie.
    */
+  const timer = bootSignal();
   try {
-    const res = await recoverSession();
+    const res = await recoverSession(timer.signal);
+    timer.clear();
     return { ok: true, token: res.token, paired: false, name: res.name };
   } catch (err) {
+    timer.clear();
     const status = (err as { status?: number }).status;
     if (status === 401) {
       // Genuinely not paired, or the session finally aged out.
@@ -201,8 +228,8 @@ export async function resolveStandaloneAuth(): Promise<StandaloneAuth> {
 }
 
 /** Trade the session cookie for a fresh token and persist it locally. */
-async function recoverSession(): Promise<{ token: string; name?: string }> {
-  const res = await api.session();
+async function recoverSession(signal?: AbortSignal): Promise<{ token: string; name?: string }> {
+  const res = await api.session(signal);
   storeToken(res.token);
   if (res.name) storeName(res.name);
   return { token: res.token, name: res.name };

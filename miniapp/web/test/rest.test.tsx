@@ -142,7 +142,7 @@ describe('threadErrorText', () => {
     );
     expect(threadErrorText(new Error('401: expired'))).toContain('bot menu');
     expect(threadErrorText(new TypeError('Failed to fetch'))).toContain(
-      'awake and online',
+      'Tailscale',
     );
   });
 

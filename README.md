@@ -489,8 +489,11 @@ use this, and it costs you nothing.
 devices, that the Mac is awake, and that
 `curl -sI https://$ASIDE_TAILNET_HOST/app` returns 200.
 
-**"Can't reach your Mac."** Server stopped or the Mac slept. `npm start`
-again and turn on Amphetamine.
+**"Can't reach your Mac."** One of three things, in order of likelihood:
+Tailscale is not connected on the phone (open the Tailscale app), the
+server is not running on the Mac (`cd ~/aside-mobile/miniapp/server &&
+npm start`), or the Mac slept (`npm run launchd` and Amphetamine both help
+with that). `npm run doctor` on the Mac names the exact one.
 
 **Pairing rejected.** The key is derived from the signing secret, so the
 page shows the same one every time and a mistyped or truncated paste is the
