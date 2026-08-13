@@ -1,0 +1,2592 @@
+/**
+ * Fastify app: auth spine, read API, write API, and the SPA host.
+ *
+ * Everything under /api except /api/auth and /api/health requires a bearer
+ * JWT; the WebSocket requires the same token via ?token= or a first
+ * `{type:"auth"}` frame.
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
+import rateLimit from '@fastify/rate-limit';
+import fastifyStatic from '@fastify/static';
+import fastifyMultipart from '@fastify/multipart';
+import {
+  EFFORT_LABELS,
+  EFFORT_LEVELS,
+  EFFORT_MENU,
+  type MiniappConfig,
+} from './config.js';
+import {
+  FacadeCache,
+  fetchDefaultModel,
+  fetchRoutines,
+  fetchSession,
+  markSessionRead,
+  archiveSession,
+} from './facade.js';
+import {
+  buildCatalog,
+  contextWindowFor,
+  modelLabel,
+  readProviderIds,
+} from './catalog.js';
+import { readDesktopState } from './desktop.js';
+import { TranscribeError, transcribeAudio } from './transcribe.js';
+import QRCode from 'qrcode';
+import { StateDb, isFullAccess, isSuspended } from './statedb.js';
+import { SettingsStore, defaultSettingsPath, resolveNewSessionModel } from './settings.js';
+import { stripAgentDirectives, withPreamble, withReminder } from './preamble.js';
+import {
+  answerMessage,
+  pendingNativeQuestion,
+  recoveryPrompt,
+} from './questions.js';
+import { ThreadStore, buildParentView, fileStamp } from './threadstore.js';
+import { SubagentIndex, toChildSession } from './subagents.js';
+import {
+  MAX_ARTIFACT_BYTES,
+  isArtifactGroup,
+  artifactContentType,
+  listArtifacts,
+  resolveArtifact,
+  type ArtifactGroup,
+} from './artifacts.js';
+import {
+  MAX_LOCAL_IMAGE_BYTES,
+  localFileRoots,
+  localFileStatus,
+  resolveLocalFile,
+} from './localfiles.js';
+import {
+  PERMISSION_MENU,
+  applyPermission,
+  isPermissionMode,
+} from './permission.js';
+import {
+  MAX_UPLOAD_BYTES,
+  MAX_UPLOAD_FILES,
+  UploadError,
+  defaultUploadsDir,
+  promptWithAttachments,
+  saveUpload,
+  type SavedUpload,
+} from './uploads.js';
+import {
+  InitDataError,
+  MAX_AUTH_AGE_SECONDS,
+  validateInitData,
+} from './initdata.js';
+import {
+  LONG_TOKEN_TTL_SECONDS,
+  REFRESH_BELOW_SECONDS,
+  TokenError,
+  bearerFrom,
+  cookieFrom,
+  mintToken,
+  secondsRemaining,
+  sessionCookie,
+  verifyToken,
+} from './auth.js';
+import { SuggestClient } from './suggest.js';
+import { VisitStore } from './visits.js';
+import { buildOmnibox, buildZeroState } from './omnibox.js';
+import { asUrl } from './urlguess.js';
+import { HistoryReader } from './history.js';
+import { parseTranscript } from './transcript.js';
+import { buildThread } from './thread.js';
+import { readHistory } from './jsonl.js';
+import {
+  firstUserText,
+  isMobileSession,
+  isPlaceholderTitle,
+  isValidSessionId,
+  listSessionRows,
+  resolveSessionDir,
+  sessionMsgFile,
+  titleFromTranscript,
+  waitForTranscript,
+} from './sessions.js';
+import { SoftConfirmStore, defaultSoftConfirmPath } from './softconfirm.js';
+import { TurnRunner } from './exec.js';
+import { WatcherRegistry } from './watcher.js';
+import { attachWebSocket } from './ws.js';
+import { ActiveViewers } from './viewers.js';
+import { Notifier, LONG_RUNNING_THRESHOLD_MS } from './notify.js';
+import type { ThreadItem } from './thread.js';
+import {
+  BrowserError,
+  CaptureGate,
+  captureTab,
+  closeTab as closeBrowserTab,
+  listTabs,
+  openNewTab,
+  snapshotTab,
+} from './browser.js';
+import { defaultAsideRoot } from './config.js';
+import {
+  buildMemoryTree,
+  readMemoryFile,
+  resolveMemoryFile,
+} from './memorybrowser.js';
+import { searchTranscripts } from './search.js';
+
+const MAX_MESSAGE_CHARS = 32_000;
+const DEFAULT_ENTRY_LIMIT = 800;
+
+/** Ceiling on a transcript read whole into memory. See the /messages route. */
+const MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024;
+
+/** Upload receipts older than this are dropped, with their bytes. */
+const UPLOAD_TTL_MS = 6 * 60 * 60 * 1000;
+const UPLOAD_SWEEP_MS = 30 * 60 * 1000;
+/** Hard ceiling on live receipts, so a flood cannot grow the map forever. */
+const MAX_UPLOAD_RECEIPTS = 200;
+
+/**
+ * Strip the query string out of a logged URL.
+ *
+ * The artifact download route accepts `?token=<jwt>` because a download is
+ * handed to the OS and cannot carry a header -- and Fastify's default `req`
+ * serializer logs `req.url` verbatim, which wrote a live 24h bearer token
+ * into miniapp.log in cleartext on every download. Observed directly; the
+ * path is all the log needs.
+ */
+/**
+ * iOS launch screens.
+ *
+ * Without these, tapping the home-screen icon shows a white rectangle
+ * until the bundle has parsed and React has painted. iOS will not derive
+ * one from the manifest's `background_color` the way Android does; the
+ * only way to control that first frame is to hand it a matching image per
+ * device, selected by media query.
+ *
+ * Portrait only, because the manifest locks the app to portrait, so the
+ * landscape variants could never be shown. Generated by
+ * `scripts/gen-splash.mjs` -- regenerate rather than hand-editing, and add
+ * a row here when Apple ships a new display size.
+ */
+const APPLE_LAUNCH_SCREENS: string[] = (
+  [
+    [440, 956, 3, 'iphone-16-pro-max'],
+    [402, 874, 3, 'iphone-16-pro'],
+    [430, 932, 3, 'iphone-15-pro-max'],
+    [393, 852, 3, 'iphone-15-pro'],
+    [428, 926, 3, 'iphone-13-pro-max'],
+    [390, 844, 3, 'iphone-13-pro'],
+    [375, 812, 3, 'iphone-x'],
+    [414, 896, 3, 'iphone-xs-max'],
+    [414, 896, 2, 'iphone-xr'],
+    [375, 667, 2, 'iphone-se'],
+    [414, 736, 3, 'iphone-8-plus'],
+    [320, 568, 2, 'iphone-se1'],
+  ] as [number, number, number, string][]
+).map(
+  ([w, h, ratio, name]) =>
+    `  <link rel="apple-touch-startup-image" media="(device-width: ${w}px) and ` +
+    `(device-height: ${h}px) and (-webkit-device-pixel-ratio: ${ratio}) and ` +
+    `(orientation: portrait)" href="/splash/${name}.png" />`,
+);
+
+export function redactedRequest(request: {
+  method?: string;
+  url?: string;
+  headers?: Record<string, unknown>;
+  ip?: string;
+  socket?: { remotePort?: number };
+}): Record<string, unknown> {
+  const raw = String(request.url ?? '');
+  const cut = raw.indexOf('?');
+  return {
+    method: request.method,
+    url: cut === -1 ? raw : `${raw.slice(0, cut)}?<redacted>`,
+    remoteAddress: request.ip,
+    remotePort: request.socket?.remotePort,
+  };
+}
+
+export interface BuiltServer {
+  app: FastifyInstance;
+  runner: TurnRunner;
+  watchers: WatcherRegistry;
+  subagents: SubagentIndex;
+}
+
+export interface BuildOptions {
+  /** Absolute path to the built SPA; static hosting is skipped if absent. */
+  webDist?: string;
+  jwtSecret: string;
+  logger?: boolean;
+  /**
+   * The current public tunnel URL, read lazily.
+   *
+   * A function rather than a value because a quick tunnel rotates its
+   * hostname while the server runs, so a snapshot taken at boot would be
+   * wrong within the hour. The settings screen shows it; nothing depends
+   * on it.
+   */
+  publicUrl?: () => string | null;
+  /** Shown on the settings screen, so the owner can tell builds apart. */
+  version?: string;
+  /**
+   * Stable tailnet hostname for this Mac, read lazily.
+   *
+   * Unlike `publicUrl` this one does not rotate, which is the entire reason
+   * an installed app can exist: a home-screen icon bakes its URL at install
+   * time and has no way to learn a new one.
+   */
+  tailnetHost?: () => string | null;
+}
+
+export async function buildServer(
+  config: MiniappConfig,
+  opts: BuildOptions,
+): Promise<BuiltServer> {
+  const app = Fastify({
+    logger: opts.logger
+      ? { serializers: { req: redactedRequest } }
+      : (opts.logger ?? false),
+    /**
+     * `trustProxy` is deliberately OFF.
+     *
+     * It used to be `true`, which made `request.ip` the leftmost
+     * `X-Forwarded-For` entry -- a header any client past the tunnel can
+     * write. Since @fastify/rate-limit keys its buckets on `request.ip`,
+     * that turned every limit in this file into a no-op: 30 `/api/auth`
+     * attempts with a rotating `X-Forwarded-For` drew zero 429s. Verified
+     * against this server, and pinned by a test.
+     *
+     * With it off, `request.ip` is the real socket peer -- the cloudflared
+     * process on loopback -- so every request shares one bucket. For a
+     * single-owner app that is the correct granularity anyway, and it is
+     * the only one an attacker cannot choose for themselves.
+     */
+    trustProxy: false,
+  });
+  const startedAt = Date.now();
+
+  // Read-only reader for the daemon's session table: the list, and each
+  // session's permission mode, final-confirm flag, pinned model and status.
+  // Declared before the runner because the runner's suspend watchdog reads
+  // status through it.
+  const stateDb = new StateDb(config.stateDbPath);
+
+  const runner = new TurnRunner({
+    asideCli: config.asideCli,
+    sessionsDir: config.sessionsDir,
+    execTimeoutMs: config.execTimeoutMs,
+    defaultModel: config.defaultModel,
+    defaultEffort: config.defaultEffort,
+    modelAliases: config.modelAliases,
+    grantFullAccess: process.env.MINIAPP_GRANT_FULL_ACCESS === '1',
+    /**
+     * The suspend watchdog's eyes. A session blocked on a native question
+     * tool goes to `status=suspended` and the driver we spawned would
+     * otherwise hang forever waiting for a desktop-only answer.
+     *
+     * The cache is invalidated first because `StateDb.read` holds a row for
+     * 5s and the watchdog's entire job is to notice a transition promptly.
+     */
+    readStatus: async (sessionId) => {
+      stateDb.invalidate(sessionId);
+      return (await stateDb.read(sessionId)).status;
+    },
+  });
+  const watchers = new WatcherRegistry();
+  // Defaults for sessions this app creates, in this app's own store. See
+  // settings.ts for why nothing here writes Aside's global settings.
+  const settings = new SettingsStore(
+    defaultSettingsPath(config.miniapp.stateDir),
+  );
+  // "Confirm before acting" for sessions driven from a phone. It is NOT
+  // the daemon's `finalConfirm`: that one mandates the native confirmation
+  // tool, which is the thing that bricks a mobile session. See
+  // softconfirm.ts.
+  const softConfirm = new SoftConfirmStore(
+    defaultSoftConfirmPath(config.miniapp.stateDir),
+  );
+  // Every facade call spawns the CLI binary, so reads go through a
+  // short-TTL, in-flight-coalescing cache rather than straight to it.
+  const facade = new FacadeCache({ asideCli: config.asideCli });
+  // Threads are built from the transcript on disk, so a rebuild is a file
+  // read rather than a process spawn -- cheap enough to redo per write.
+  const threads = new ThreadStore((file) =>
+    fileStamp(file, (p) => fs.statSync(p, { throwIfNoEntry: false }) || undefined),
+  );
+  const uploadsDir = defaultUploadsDir();
+
+  // The catalog USED to be built once, on the assumption that its inputs
+  // could not change while we run. That assumption was wrong: the desktop
+  // app rewrites ~/.aside/u/0/models.json whenever a provider or model is
+  // edited, so a catalog frozen at boot goes stale the moment the owner
+  // touches their model list -- which is exactly how the phone ended up
+  // offering models that no longer existed and hiding ones that did.
+  //
+  // Rebuilding is two small cached-by-the-OS file reads, but it is on the
+  // thread-render path, so it is memoised for a few seconds. Short enough
+  // that a change in the desktop shows up on the phone almost at once, long
+  // enough that a burst of requests does not re-read per item.
+  const CATALOG_TTL_MS = 5_000;
+  let catalogCache: ReturnType<typeof buildCatalog> = [];
+  let catalogAt = 0;
+
+  function currentCatalog(): ReturnType<typeof buildCatalog> {
+    const now = Date.now();
+    if (now - catalogAt < CATALOG_TTL_MS && catalogCache.length) {
+      return catalogCache;
+    }
+    const desktop = readDesktopState(config.sessionsDir);
+    catalogCache = buildCatalog(
+      readProviderIds(config.credentialsPath),
+      config.modelCatalogOverrides as any,
+      desktop.providers,
+      [desktop.defaultModel, ...Object.values(desktop.categories)],
+    );
+    catalogAt = now;
+    return catalogCache;
+  }
+
+  /**
+   * Kept as a getter-backed alias so the many existing `catalog` readers
+   * below pick up refreshes without each one having to remember to call
+   * `currentCatalog()`.
+   */
+  const catalog = new Proxy([] as ReturnType<typeof buildCatalog>, {
+    get(_target, prop, receiver) {
+      return Reflect.get(currentCatalog(), prop, receiver);
+    },
+    has(_target, prop) {
+      return Reflect.has(currentCatalog(), prop);
+    },
+    ownKeys() {
+      return Reflect.ownKeys(currentCatalog());
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      return Reflect.getOwnPropertyDescriptor(currentCatalog(), prop);
+    },
+  }) as ReturnType<typeof buildCatalog>;
+
+  /**
+   * Subagents of a session, read from the daemon's table and kept warm so
+   * the synchronous thread build can see them. See `SubagentIndex`.
+   */
+  const subagents = new SubagentIndex(async (parentId) => {
+    const rows = await stateDb.children(parentId);
+    if (!rows) return null;
+    return rows.map((row) =>
+      toChildSession(row, (provider, modelId) =>
+        modelLabel(catalog, provider, modelId),
+      ),
+    );
+  });
+
+  // --- Day 2: outbound pushes for a turn nobody is watching --------------
+  // Reference-counts who is actively subscribed over the WS, so a push
+  // never duplicates what is already on screen (plan 6.6).
+  const viewers = new ActiveViewers();
+  const notifier = new Notifier({
+    botToken: config.botToken,
+    chatId: config.allowedUserId,
+    stateDir: config.miniapp.stateDir,
+    deepLinkBase: config.miniapp.deepLinkBase,
+    isBeingViewed: (sessionId) => viewers.isActive(sessionId),
+    onError: (context, err) =>
+      app.log.warn({ err, context }, 'notify failed'),
+  });
+
+  /** The last final-answer bubble's text, trimmed for a push notification. */
+  function lastAssistantSummary(items: ThreadItem[]): string {
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const item = items[i];
+      if (item.kind !== 'answer') continue;
+      const text = String(item.text || '').replace(/\s+/g, ' ').trim();
+      return text.length > 240 ? `${text.slice(0, 239)}…` : text;
+    }
+    return '';
+  }
+
+  /** Tool names this codebase's browser-driving steps show up under. Kept as a loose keyword match rather than an exact enum -- the exact tool registry lives outside this server, and a false negative (skipping a thumbnail) is a far cheaper mistake than a false positive (capturing an unrelated tab). */
+  const BROWSER_TOOL_HINTS = [
+    'browser',
+    'tab',
+    'snapshot',
+    'screenshot',
+    'navigate',
+    'click',
+    'scroll',
+    'openurl',
+    'open_tab',
+  ];
+
+  function turnTouchedBrowser(items: ThreadItem[]): boolean {
+    for (const item of items) {
+      if (item.kind !== 'work') continue;
+      for (const workItem of item.items) {
+        if (workItem.kind !== 'step') continue;
+        const tool = String(workItem.tool || '').toLowerCase();
+        if (BROWSER_TOOL_HINTS.some((hint) => tool.includes(hint))) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Plan 7.5: if the turn drove the browser, the completion push carries
+   * visual proof. Best-effort in every direction -- no open tabs, a
+   * capture failure, anything -- just means the plain text notice ships
+   * instead, never a broken push.
+   */
+  async function captureCompletionThumbnail(
+    items: ThreadItem[],
+  ): Promise<string | null> {
+    if (!turnTouchedBrowser(items)) return null;
+    try {
+      const tabs = await listTabs(facade);
+      const target = tabs.find((tab) => tab.active) || tabs[0];
+      if (!target) return null;
+      const result = await captureTab(facade, target.targetId, { quality: 55 });
+      return result.base64;
+    } catch {
+      return null;
+    }
+  }
+
+  const longRunningTimers = new Map<string, NodeJS.Timeout>();
+
+  runner.on('turn_started', (turn) => {
+    notifier.beginTurn(turn.sessionId, turn.startedAt);
+    const existingTimer = longRunningTimers.get(turn.sessionId);
+    if (existingTimer) clearTimeout(existingTimer);
+    const timer = setTimeout(() => {
+      longRunningTimers.delete(turn.sessionId);
+      if (!runner.isBusy(turn.sessionId)) return;
+      void fetchSession(facade, turn.sessionId).then(
+        (session) => {
+          void notifier.notifyLongRunning(
+            { id: turn.sessionId, title: session?.title || 'Session' },
+            Date.now() - turn.startedAt,
+          );
+        },
+        () => {},
+      );
+    }, LONG_RUNNING_THRESHOLD_MS);
+    timer.unref?.();
+    longRunningTimers.set(turn.sessionId, timer);
+  });
+
+  runner.on('turn_finished', (turn) => {
+    const existingTimer = longRunningTimers.get(turn.sessionId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      longRunningTimers.delete(turn.sessionId);
+    }
+    // A stopped turn is the user's own deliberate tap -- nothing to say
+    // that they do not already know. Everything else is worth a push.
+    if (turn.stopped) return;
+    void (async () => {
+      try {
+        const session = await fetchSession(facade, turn.sessionId).catch(
+          () => null,
+        );
+        const notifySession = { id: turn.sessionId, title: session?.title || 'Session' };
+
+        if (turn.alert && !turn.suspended) {
+          await notifier.notifyError(notifySession, turn.alert);
+          return;
+        }
+
+        const msgFile = sessionMsgFile(config.sessionsDir, turn.sessionId);
+        if (msgFile && fs.existsSync(msgFile)) {
+          const snapshot = threads.build(
+            turn.sessionId,
+            msgFile,
+            false,
+            subagents.snapshot(turn.sessionId, false),
+          );
+          const last = snapshot.items[snapshot.items.length - 1];
+          if (
+            last &&
+            last.kind === 'question' &&
+            last.status === 'pending' &&
+            last.answerable &&
+            last.questions[0]
+          ) {
+            notifier.setWaiting(turn.sessionId, true);
+            await notifier.notifyBlocked(notifySession, last.questions[0], last.id);
+            return;
+          }
+          const summary = lastAssistantSummary(snapshot.items);
+          const thumbnail = await captureCompletionThumbnail(snapshot.items);
+          if (thumbnail) {
+            await notifier.notifyFinishedWithPhoto(notifySession, summary, thumbnail);
+          } else {
+            await notifier.notifyFinished(notifySession, summary);
+          }
+          return;
+        }
+        await notifier.notifyFinished(notifySession, '');
+      } catch (err) {
+        app.log.warn({ err }, 'turn_finished notify failed');
+      }
+    })();
+  });
+
+  await app.register(rateLimit, {
+    global: true,
+    max: 120,
+    timeWindow: '1 minute',
+    // Belt and braces alongside `trustProxy: false`: the bucket key is read
+    // off the socket, never off a header, so no request can choose it.
+    keyGenerator: (request) =>
+      (request.raw.socket?.remoteAddress as string | undefined) || 'unknown',
+  });
+
+  await app.register(fastifyMultipart, {
+    limits: {
+      fileSize: MAX_UPLOAD_BYTES,
+      files: MAX_UPLOAD_FILES,
+      // Only files are expected; a stray text field is not a reason to 500.
+      fields: 4,
+    },
+  });
+
+  /*
+   * True when the browser will accept a `Secure` cookie for this request.
+   *
+   * Tailscale terminates TLS and proxies to plain loopback, so Fastify sees
+   * http on a request the phone made over https. The forwarded header is
+   * what carries the truth; falling back to the request protocol keeps
+   * local testing over 127.0.0.1 working.
+   */
+  const wantsSecureCookie = (request: FastifyRequest): boolean => {
+    const fwd = request.headers['x-forwarded-proto'];
+    const proto = Array.isArray(fwd) ? fwd[0] : fwd;
+    if (proto) return String(proto).split(',')[0].trim() === 'https';
+    return request.protocol === 'https';
+  };
+
+  /**
+   * Hand back a session cookie when the caller does not already have a
+   * healthy one.
+   *
+   * This is what makes the installed app stop asking to be paired. Any
+   * authenticated request is proof the client holds a valid token, so the
+   * server takes that moment to write the durable copy it can recover from
+   * later, and refreshes it well before expiry so ordinary use renews the
+   * session without the owner ever seeing a pairing screen again.
+   */
+  const refreshSessionCookie = (
+    request: FastifyRequest,
+    reply: any,
+    claims: { sub: string; uid: number; name?: string },
+  ): void => {
+    const existing = cookieFrom(request.headers.cookie);
+    if (existing && secondsRemaining(existing) > REFRESH_BELOW_SECONDS) return;
+    const fresh = mintToken(
+      opts.jwtSecret,
+      {
+        sub: claims.sub,
+        uid: claims.uid,
+        // The name is re-read from config rather than carried forward, so a
+        // token minted before the greeting knew the owner's name still ends
+        // up naming them after one launch.
+        name: claims.name || config.miniapp.ownerName || undefined,
+      },
+      LONG_TOKEN_TTL_SECONDS,
+    );
+    reply.header(
+      'set-cookie',
+      sessionCookie(fresh, LONG_TOKEN_TTL_SECONDS, wantsSecureCookie(request)),
+    );
+  };
+
+  /**
+   * Token gate for every /api route except auth, pair and health.
+   *
+   * Accepts the bearer header first (Telegram launches and the freshly
+   * paired app both have one in memory) and falls back to the session
+   * cookie, which is the copy that survives a cleared localStorage.
+   */
+  const requireAuth = async (request: FastifyRequest, reply: any) => {
+    const presented =
+      bearerFrom(request.headers.authorization) ??
+      cookieFrom(request.headers.cookie);
+    try {
+      const claims = verifyToken(
+        presented,
+        opts.jwtSecret,
+        config.allowedUserId,
+      );
+      (request as any).user = claims;
+      refreshSessionCookie(request, reply, claims);
+    } catch (err) {
+      const code = err instanceof TokenError ? err.code : 'invalid';
+      return reply.code(401).send({ error: 'unauthorized', reason: code });
+    }
+  };
+
+  /**
+   * Same gate, but also accepting `?token=`.
+   *
+   * Used only by the artifact download route: a download is handed to the
+   * OS (or to Telegram's own downloader), which issues a plain GET and
+   * cannot carry an Authorization header. The WebSocket upgrade already
+   * accepts the token this way for the same reason.
+   */
+  const requireAuthOrQueryToken = async (request: FastifyRequest, reply: any) => {
+    const fromQuery = (request.query as { token?: unknown }).token;
+    if (typeof fromQuery === 'string' && fromQuery) {
+      try {
+        (request as any).user = verifyToken(
+          fromQuery,
+          opts.jwtSecret,
+          config.allowedUserId,
+        );
+        return;
+      } catch {
+        return reply.code(401).send({ error: 'unauthorized' });
+      }
+    }
+    return requireAuth(request, reply);
+  };
+
+  app.get('/api/health', async () => ({ ok: true }));
+
+  /**
+   * Standalone pairing (home-screen PWA).
+   *
+   * Telegram's initData is a bootstrap credential, not the session itself:
+   * a valid launch mints the JWT that every other route actually checks.
+   * Installed to the home screen there is no Telegram to launch from, so
+   * this offers a second bootstrap into the same spine and mints the same
+   * kind of token, just with a longer life so the app is not re-pairing
+   * every day.
+   *
+   * The key is derived from the existing HS256 signing secret, so pairing
+   * adds no new secret to store, rotate, or leak. Compared in constant time.
+   * This route is reachable only over the private tailnet, so the network
+   * is a second gate behind this one.
+   */
+  const pairingKey = crypto
+    .createHash('sha256')
+    .update(`${opts.jwtSecret}:standalone-pairing:v1`)
+    .digest('hex')
+    .slice(0, 32);
+
+  app.post(
+    '/api/pair',
+    { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } },
+    async (request, reply) => {
+      const body = (request.body || {}) as { key?: unknown };
+      const given = Buffer.from(String(body.key ?? ''));
+      const expected = Buffer.from(pairingKey);
+      const ok =
+        given.length === expected.length &&
+        crypto.timingSafeEqual(given, expected);
+      if (!ok) {
+        return reply.code(401).send({ error: 'pair_failed' });
+      }
+      // 90 days: long enough that the phone is not a daily chore, short
+      // enough that a lost device stops working inside a season.
+      const ttl = LONG_TOKEN_TTL_SECONDS;
+      // Telegram supplies the owner's first name on every launch; there is no
+      // equivalent here, so it comes from config and falls back to nothing
+      // rather than to a placeholder the greeting would read out loud.
+      const name = config.miniapp.ownerName || undefined;
+      const token = mintToken(
+        opts.jwtSecret,
+        { sub: String(config.allowedUserId), uid: config.allowedUserId, name },
+        ttl,
+      );
+      // Written as a cookie as well as returned in the body. The body copy
+      // is what the running page uses; the cookie is what survives the app
+      // being closed, storage being evicted, or the pairing link having been
+      // opened in a different browser than the one that installed the app.
+      reply.header(
+        'set-cookie',
+        sessionCookie(token, ttl, wantsSecureCookie(request)),
+      );
+      return { token, name, expiresIn: ttl };
+    },
+  );
+
+  /**
+   * Recover a session without re-pairing.
+   *
+   * The installed app calls this at boot when it has no usable token of its
+   * own. If the browser still holds the session cookie, it gets a fresh
+   * token back and the owner never sees a pairing screen. If it does not,
+   * this 401s and the app falls through to asking for a pairing link, which
+   * is the only case where re-pairing is genuinely required.
+   */
+  app.get(
+    '/api/session',
+    { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+    async (request, reply) => {
+      const presented =
+        bearerFrom(request.headers.authorization) ??
+        cookieFrom(request.headers.cookie);
+      let claims;
+      try {
+        claims = verifyToken(presented, opts.jwtSecret, config.allowedUserId);
+      } catch (err) {
+        const code = err instanceof TokenError ? err.code : 'invalid';
+        return reply.code(401).send({ error: 'unauthorized', reason: code });
+      }
+      const name = claims.name || config.miniapp.ownerName || undefined;
+      const token = mintToken(
+        opts.jwtSecret,
+        { sub: claims.sub, uid: claims.uid, name },
+        LONG_TOKEN_TTL_SECONDS,
+      );
+      reply.header(
+        'set-cookie',
+        sessionCookie(
+          token,
+          LONG_TOKEN_TTL_SECONDS,
+          wantsSecureCookie(request),
+        ),
+      );
+      return { token, name, expiresIn: LONG_TOKEN_TTL_SECONDS };
+    },
+  );
+
+  /*
+   * The Aside browser's own visit history.
+   *
+   * Read straight out of the desktop profile's Chromium history database,
+   * so this is the same history the Mac shows rather than a separate log.
+   * Read-only and immutable; see history.ts for why that matters while the
+   * browser holds the file open.
+   */
+  const historyReader = new HistoryReader();
+
+  app.get(
+    '/api/history/browser',
+    {
+      preHandler: requireAuth,
+      config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+    },
+    async (request, reply) => {
+      const q = request.query as { q?: unknown; limit?: unknown };
+      const query = typeof q.q === 'string' ? q.q.slice(0, 120) : '';
+      const limit = Number(q.limit) || 40;
+      const entries = await historyReader.recent({ query, limit });
+      if (!entries.length && historyReader.error) {
+        // An empty list and a broken reader look identical to the client
+        // otherwise, and they need very different messages.
+        return reply
+          .code(503)
+          .send({ error: 'history_unavailable', reason: historyReader.error });
+      }
+      return { entries, query };
+    },
+  );
+
+  /*
+   * Address-bar suggestions.
+   *
+   * Google's suggest endpoint plus both devices' history, blended by
+   * `omnibox.ts`. The rate limit is high because this fires per keystroke
+   * (debounced on the client), and a typeahead that starts 429ing halfway
+   * through a word is worse than no typeahead at all.
+   */
+  const suggestClient = new SuggestClient();
+  const visitStore = new VisitStore();
+  app.addHook('onClose', async () => visitStore.stop());
+
+  app.get(
+    '/api/omnibox',
+    {
+      preHandler: requireAuth,
+      config: { rateLimit: { max: 240, timeWindow: '1 minute' } },
+    },
+    async (request) => {
+      const params = request.query as { q?: unknown };
+      const query = String(params.q ?? '').slice(0, 200).trim();
+
+      if (!query) {
+        const [history, visits] = await Promise.all([
+          historyReader.recent({ limit: 40 }),
+          visitStore.recent({ limit: 40 }),
+        ]);
+        return { query, items: buildZeroState(history, visits) };
+      }
+
+      /*
+       * The local half never waits on the network half.
+       *
+       * `suggest()` already resolves to `[]` rather than rejecting, so a
+       * slow or unreachable Google degrades this to a history-only list on
+       * its own schedule instead of holding the keystroke.
+       */
+      const [history, visits, suggestions] = await Promise.all([
+        historyReader.recent({ query, limit: 200 }),
+        visitStore.recent({ limit: 400 }),
+        suggestClient.suggest(query),
+      ]);
+
+      return {
+        query,
+        items: buildOmnibox({
+          query,
+          history,
+          visits,
+          suggestions,
+          directUrl: asUrl(query),
+        }),
+      };
+    },
+  );
+
+  /*
+   * Record what the phone did, so the address bar on either device can see
+   * it. Deliberately not a write into Chromium's own database; see
+   * `visits.ts` for why that would be the wrong kind of clever.
+   */
+  app.post(
+    '/api/browse/visit',
+    {
+      preHandler: requireAuth,
+      config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+    },
+    async (request, reply) => {
+      const body = (request.body ?? {}) as {
+        kind?: unknown;
+        title?: unknown;
+        url?: unknown;
+      };
+      const kind = body.kind === 'search' ? 'search' : 'page';
+      const url = String(body.url ?? '').trim();
+      if (!url) return reply.code(400).send({ error: 'missing_url' });
+      if (!/^https?:\/\//i.test(url)) {
+        return reply.code(400).send({ error: 'bad_url' });
+      }
+      const visit = await visitStore.record({
+        kind,
+        title: String(body.title ?? '').trim(),
+        url,
+      });
+      return { visit };
+    },
+  );
+
+  /** Unified recent history across both devices, newest first. */
+  app.get(
+    '/api/browse/recent',
+    {
+      preHandler: requireAuth,
+      config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+    },
+    async (request) => {
+      const params = request.query as { q?: unknown; limit?: unknown };
+      const query = String(params.q ?? '').slice(0, 120);
+      const limit = Math.min(Number(params.limit) || 60, 200);
+      const [history, visits] = await Promise.all([
+        historyReader.recent({ query, limit }),
+        visitStore.recent({ query, limit }),
+      ]);
+      return { items: buildZeroState(history, visits, limit), query };
+    },
+  );
+
+  /*
+   * There is deliberately no server-side search route.
+   *
+   * There used to be one: it drove the Mac's browser over `aside repl`,
+   * navigated Google, scraped the result page and shipped the pieces back
+   * as JSON. It worked, and it was the wrong shape for the problem. Every
+   * query paid for a CLI child, a tab, a page load and an extraction
+   * before the phone saw anything, which is where "waking browser /
+   * searching Google / reading results" came from, and what came back was
+   * a list of links with none of the surfaces that make a result page
+   * useful.
+   *
+   * Search now happens on the phone, because that is where a browser
+   * already is. The Android shell opens a Chrome Custom Tab, which is real
+   * Chrome on real Chrome cookies, so the owner is signed in and the Mac
+   * is not in the critical path at all. What the server still does is the
+   * half a phone genuinely cannot: `/api/omnibox` blends Google's
+   * suggestions with the Mac's own Chromium history, which is the one
+   * thing Chrome on the phone has no way to see.
+   */
+
+  /**
+   * Speech to text, decoded on this machine.
+   *
+   * The composer posts one recording and gets prose back. Deliberately not
+   * streaming: a spoken message is a few seconds of audio, the round trip is
+   * comparable to the pause after letting go of the button, and a partial
+   * transcript that rewrites itself mid-sentence is worse to watch than a
+   * brief spinner.
+   */
+  app.post(
+    '/api/transcribe',
+    {
+      preHandler: requireAuth,
+      config: { rateLimit: { max: 40, timeWindow: '1 minute' } },
+    },
+    async (request, reply) => {
+      let audio: Buffer | null = null;
+      let language: string | undefined;
+      try {
+        for await (const part of (request as any).parts()) {
+          if (part.type === 'file' && !audio) {
+            audio = await part.toBuffer();
+          } else if (part.type === 'field' && part.fieldname === 'language') {
+            language = String(part.value || '') || undefined;
+          }
+        }
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code === 'FST_REQ_FILE_TOO_LARGE') {
+          return reply.code(413).send({ error: 'audio_too_large' });
+        }
+        request.log.error({ err }, 'transcribe upload failed');
+        return reply.code(400).send({ error: 'bad_upload' });
+      }
+
+      if (!audio || audio.length === 0) {
+        return reply.code(400).send({ error: 'empty_audio' });
+      }
+
+      try {
+        const { text, ms } = await transcribeAudio(audio, {
+          modelPath: config.whisperModelPath,
+          language: language || config.whisperLanguage || 'en',
+        });
+        request.log.info({ ms, chars: text.length }, 'transcribed');
+        return { text, ms };
+      } catch (err) {
+        if (err instanceof TranscribeError) {
+          const status =
+            err.code === 'audio_too_large' ? 413
+            : err.code === 'timeout' ? 504
+            : err.code.endsWith('_missing') ? 503
+            : 500;
+          request.log.error({ code: err.code, msg: err.message }, 'transcribe failed');
+          return reply.code(status).send({ error: err.code, reason: err.message });
+        }
+        request.log.error({ err }, 'transcribe crashed');
+        return reply.code(500).send({ error: 'internal' });
+      }
+    },
+  );
+
+  // --- Phase 0: the auth spine ------------------------------------------
+  app.post(
+    '/api/auth',
+    { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    async (request, reply) => {
+      const body = (request.body || {}) as { initDataRaw?: unknown };
+      try {
+        const validated = validateInitData(
+          String(body.initDataRaw ?? ''),
+          config.botToken,
+          config.allowedUserId,
+          { maxAgeSeconds: MAX_AUTH_AGE_SECONDS },
+        );
+        const token = mintToken(opts.jwtSecret, {
+          sub: String(validated.user.id),
+          uid: validated.user.id,
+          name: validated.user.first_name,
+        });
+        return {
+          token,
+          user: {
+            id: validated.user.id,
+            firstName: validated.user.first_name,
+            username: validated.user.username,
+          },
+          expiresIn: 24 * 60 * 60,
+        };
+      } catch (err) {
+        if (err instanceof InitDataError) {
+          const status = err.code === 'forbidden_user' ? 403 : 401;
+          return reply.code(status).send({ error: 'auth_failed', reason: err.code });
+        }
+        request.log.error({ err }, 'auth failure');
+        return reply.code(500).send({ error: 'internal' });
+      }
+    },
+  );
+
+  // --- Phase 1: read API -------------------------------------------------
+  app.get(
+    '/api/sessions',
+    { preHandler: requireAuth },
+    async (request) => {
+      const query = request.query as { limit?: string };
+      const limit = Math.min(Math.max(Number(query.limit) || 100, 1), 200);
+      const { rows, source } = await listSessionRows(
+        facade,
+        config.sessionsDir,
+        limit,
+        stateDb,
+      );
+      // "Waiting on you": suspended on a native tool (the daemon's own
+      // status), or sitting on an answerable soft-marker question nobody
+      // has tapped (notifier's tracked state -- see the turn_finished
+      // hook above). Cheap either way: no extra transcript reads.
+      const sessions = rows.map((row) => ({
+        ...row,
+        waiting: isSuspended(row.status) || notifier.isWaiting(row.id),
+      }));
+      return { sessions, source };
+    },
+  );
+
+  /** Per-session mute for push notifications (plan 6.6). */
+  app.post(
+    '/api/sessions/:id/mute',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      const body = (request.body || {}) as { hours?: number };
+      const hours = Math.min(Math.max(Number(body.hours) || 24, 1), 24 * 30);
+      notifier.mute(id, hours * 60 * 60 * 1000);
+      return { ok: true, mutedForHours: hours };
+    },
+  );
+
+  /**
+   * Delete a chat from the phone.
+   *
+   * "Delete" here means `aside.sessions.archive`, which is the only
+   * non-destructive verb the daemon exposes and the only one that is safe
+   * to call from a remote client -- see `archiveSession` for why reaching
+   * into the daemon's sqlite was rejected. `sessions.list()` already skips
+   * archived rows, so the effect on this app is total: the chat is gone
+   * from history, from search, and from notifications.
+   *
+   * DELETE rather than POST because it is idempotent: archiving an already
+   * archived session is a no-op, so a retry after a flaky phone connection
+   * cannot do damage.
+   */
+  app.delete(
+    '/api/sessions/:id',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      try {
+        await archiveSession(facade, id);
+      } catch (error) {
+        request.log.error({ err: error, id }, 'archive failed');
+        return reply.code(502).send({ error: 'archive_failed' });
+      }
+      // A deleted chat must not keep buzzing the phone about a turn it can
+      // no longer be opened to read.
+      notifier.unmute(id);
+      notifier.setWaiting(id, false);
+      return { ok: true, id };
+    },
+  );
+
+  app.post(
+    '/api/sessions/:id/unmute',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      notifier.unmute(id);
+      return { ok: true };
+    },
+  );
+
+  /**
+   * The thread as the sidepanel draws it: user bubbles, work folds, and
+   * final answers. Opening a thread also clears its unread state, so the
+   * dot disappears here and in the browser together.
+   *
+   * The transcript on disk is the source, NOT `aside.sessions.messages()`.
+   * The facade returns the agent's current CONTEXT rather than the
+   * conversation: on a long session it begins mid-turn, after compaction,
+   * with a `system-message` and a wall of tool activity and no user message
+   * in front of it. Built from that, a real session renders as one bare
+   * work fold with no bubbles and no answers -- which is exactly what the
+   * owner saw. messages.jsonl holds the whole history and the same record
+   * shape, so it is what gets parsed here.
+   */
+  app.get(
+    '/api/sessions/:id/thread',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+
+      /*
+       * Wait for a transcript that is still being written rather than
+       * 404ing on it. See `waitForTranscript`: this is the same rule the
+       * WebSocket already used, and its absence here is what made a brand
+       * new chat flash "404: session_not_found" before it settled.
+       */
+      const msgFile = await waitForTranscript(config.sessionsDir, id, (sid) =>
+        runner.isBusy(sid),
+      );
+      if (!msgFile) {
+        return reply.code(404).send({ error: 'session_not_found' });
+      }
+
+      const session = await fetchSession(facade, id).catch(() => null);
+      const running = runner.isBusy(id) || session?.status === 'running';
+      // A thread open is the one place worth paying for a fresh child read
+      // rather than whatever the index happens to hold.
+      const children = await subagents.refresh(id);
+      const snapshot = buildParentView(
+        threads,
+        config.sessionsDir,
+        id,
+        msgFile,
+        running,
+        children,
+      );
+
+      // Best-effort; a failure here must not block the read.
+      void markSessionRead(facade, id);
+
+      // The session's real permission mode and pinned model. Both are null
+      // when unreadable, and the client hides rather than guesses.
+      const state = await stateDb.read(id);
+
+      /**
+       * The daemon's own status wins over the facade's.
+       *
+       * `suspended` -- blocked on a native question tool -- is the state
+       * the composer has to know about, and it is in the table. Sending a
+       * message to a suspended session queues an `aside exec` that hangs
+       * forever, so the client disables the composer on it and says why.
+       */
+      const status = state.status || session?.status || 'idle';
+
+      /**
+       * A session started from a phone: this app's own, or bridge.py's.
+       *
+       * The switch in the permission popover means the SOFT protocol on
+       * one of these, so what it shows has to come from the soft store --
+       * the daemon's own flag is held at false there on purpose. See the
+       * permission route.
+       */
+      const mobile = isMobileSession(config.sessionsDir, id);
+
+      /**
+       * The daemon titles every CLI-created session "Aside CLI", and every
+       * session this app starts is CLI-created -- so the header on a
+       * brand-new thread read "Aside CLI" rather than what the
+       * conversation was about. The session LIST already worked around
+       * this (see `isPlaceholderTitle` + `localScan`); the thread route
+       * did not, so the same session showed a real title in the list and a
+       * placeholder once opened. Same rule, applied in both places now.
+       */
+      const rawTitle = session?.title || '';
+      const title = isPlaceholderTitle(rawTitle)
+        ? titleFromTranscript(config.sessionsDir, id) || rawTitle
+        : rawTitle;
+
+      return {
+        sessionId: id,
+        title,
+        status,
+        /** Blocked on a desktop-only question; see `isSuspended`. */
+        suspended: isSuspended(status),
+        /**
+         * Whether the block above has an actual answerable/recoverable
+         * question behind it. `suspended` alone can be true with nothing
+         * for the composer's recover button to act on -- the driver that
+         * hit the native tool can be reaped before the write that would
+         * have produced a clean question item lands. The client uses this
+         * to decide whether tapping "Continue in a new session" can work
+         * before it tries, instead of finding out from a 409.
+         */
+        hasRecoverableQuestion: pendingNativeQuestion(snapshot.items as any) !== null,
+        /** Push notifications silenced for this session -- see notify.ts. */
+        muted: notifier.isMuted(id),
+        items: snapshot.items,
+        stats: snapshot.stats,
+        sources: snapshot.sources,
+        /** Replayed `write_todos` state, for the task-list section. */
+        todos: snapshot.todos,
+        // From the snapshot, not from `children`: these carry the palette
+        // slot of the spawn row each child came from, so the panel and the
+        // thread draw the same creature colour.
+        subagents: snapshot.subagents,
+        /** Each subagent's timeline tail, so its card renders on first paint. */
+        subagentSteps: snapshot.children,
+        /** Set when this session is itself a subagent of another. */
+        parentId: state.parentId,
+        contextWindow: state.model
+          ? contextWindowFor(catalog, state.model.provider, state.model.modelId)
+          : contextWindowFor(catalog, 'claude-code', config.defaultModel),
+        busy: runner.isBusy(id),
+        queued: runner.queuedCount(id),
+        permission: state.permission,
+        permissionMode: state.permissionMode,
+        finalConfirm: mobile ? softConfirm.has(id) : state.finalConfirm,
+        /** True when the confirm toggle means the soft protocol. */
+        softConfirm: mobile,
+        model: state.model
+          ? {
+              provider: state.model.provider,
+              modelId: state.model.modelId,
+              label: modelLabel(
+                catalog,
+                state.model.provider,
+                state.model.modelId,
+              ),
+              effort: state.model.thinkingLevel || null,
+              effortLabel: state.model.thinkingLevel
+                ? EFFORT_LABELS[state.model.thinkingLevel] ||
+                  state.model.thinkingLevel
+                : null,
+            }
+          : null,
+      };
+    },
+  );
+
+  /**
+   * Raw transcript entries. The thread endpoint above is the primary read;
+   * this stays as the live-streaming delta source during a running turn,
+   * where tailing the jsonl beats re-spawning the CLI per token.
+   */
+  app.get(
+    '/api/sessions/:id/messages',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const query = request.query as { afterLine?: string; limit?: string };
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      const msgFile = sessionMsgFile(config.sessionsDir, id);
+      if (!msgFile || !fs.existsSync(msgFile)) {
+        return reply.code(404).send({ error: 'session_not_found' });
+      }
+      const afterLine = Number.isFinite(Number(query.afterLine))
+        ? Number(query.afterLine)
+        : -1;
+      const limit = Math.min(
+        Math.max(Number(query.limit) || DEFAULT_ENTRY_LIMIT, 1),
+        5000,
+      );
+
+      // This reads the whole transcript into memory before it can honour
+      // `afterLine`, because line offsets are the cursor. A real session
+      // reaches 57MB on the owner's machine, so the read is capped rather
+      // than left to allocate whatever is on disk -- an oversized transcript
+      // is reported as truncated instead of being turned into a 180MB
+      // allocation per request.
+      const size = fs.statSync(msgFile, { throwIfNoEntry: false })?.size ?? 0;
+      if (size > MAX_TRANSCRIPT_BYTES) {
+        return reply.code(413).send({ error: 'transcript_too_large' });
+      }
+      const buffer = fs.readFileSync(msgFile, 'utf8');
+      const { entries, lastLine } = parseTranscript(buffer, { afterLine });
+      const truncated = entries.length > limit;
+      return {
+        sessionId: id,
+        entries: truncated ? entries.slice(-limit) : entries,
+        truncated,
+        lastLine,
+        busy: runner.isBusy(id),
+        queued: runner.queuedCount(id),
+      };
+    },
+  );
+
+  /**
+   * The session's own files: what the agent wrote, and what came in with a
+   * message. Both groups are always reported so the panel can say "no
+   * files yet" rather than omitting a section that exists but is empty.
+   */
+  app.get(
+    '/api/sessions/:id/artifacts',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const dir = isValidSessionId(id)
+        ? resolveSessionDir(config.sessionsDir, id)
+        : null;
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      if (!dir) return reply.code(404).send({ error: 'session_not_found' });
+
+      return {
+        sessionId: id,
+        groups: [
+          { id: 'artifacts', files: listArtifacts(dir, 'artifacts') },
+          { id: 'attachments', files: listArtifacts(dir, 'attachments') },
+        ],
+      };
+    },
+  );
+
+  /**
+   * One file's bytes.
+   *
+   * The path is resolved and realpath-checked against the group directory
+   * before anything is read, so neither `../` nor a symlink can name a file
+   * elsewhere on the machine -- see `resolveArtifact`.
+   */
+  app.get(
+    '/api/sessions/:id/artifacts/file',
+    { preHandler: requireAuthOrQueryToken },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const query = request.query as { path?: string; group?: string };
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      const group: ArtifactGroup = isArtifactGroup(query.group)
+        ? query.group
+        : 'artifacts';
+      const dir = resolveSessionDir(config.sessionsDir, id);
+      if (!dir) return reply.code(404).send({ error: 'session_not_found' });
+
+      const file = resolveArtifact(dir, group, String(query.path ?? ''));
+      if (!file) return reply.code(403).send({ error: 'forbidden_path' });
+
+      // The agent owns this directory and may be rewriting it right now, so
+      // the file can disappear between the resolve above and this stat. That
+      // is a 404, not an unhandled throw turning into a 500.
+      const stat = fs.statSync(file, { throwIfNoEntry: false });
+      if (!stat?.isFile()) {
+        return reply.code(404).send({ error: 'file_not_found' });
+      }
+      if (stat.size > MAX_ARTIFACT_BYTES) {
+        return reply.code(413).send({ error: 'file_too_large' });
+      }
+
+      /*
+       * The agent owns this directory and may be rewriting it right now,
+       * so the file can vanish between the stat above and the open below.
+       * Unguarded, that ENOENT surfaced as an unhandled 500; a file that
+       * has just been deleted is a 404.
+       */
+      let stream: fs.ReadStream;
+      try {
+        stream = fs.createReadStream(file);
+      } catch {
+        return reply.code(404).send({ error: 'file_not_found' });
+      }
+      stream.on('error', () => stream.destroy());
+
+      return reply
+        .header('content-type', artifactContentType(file))
+        .header('cache-control', 'private, no-store')
+        // These bytes are agent output; nothing here should ever be treated
+        // as markup for our own origin.
+        .header('content-security-policy', "sandbox; default-src 'none'")
+        .header('x-content-type-options', 'nosniff')
+        .send(stream);
+    },
+  );
+
+  /**
+   * A local image an answer points at, by absolute path.
+   *
+   * Answers routinely contain `![shot](/Users/…/shot.png)`, because the
+   * agent writes markdown for a reader who is on the same machine it is.
+   * The webview is not, so without this the bubble renders a broken-image
+   * icon -- reported from a live run, where the same screenshot displayed
+   * fine in the work timeline (transcript data URIs) and not in the answer
+   * above it.
+   *
+   * Deliberately NOT a general file route: `resolveLocalFile` accepts
+   * three roots, images only, 10 MB, realpath-contained. See
+   * `localfiles.ts` for why each of those is there. `?token=` is accepted
+   * for the same reason the artifact route accepts it -- an `<img>` tag
+   * cannot carry an Authorization header -- and the logger's query
+   * redaction (see `redactedRequest`) covers this path too.
+   */
+  app.get(
+    '/api/sessions/:id/file',
+    { preHandler: requireAuthOrQueryToken },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const query = request.query as { path?: string };
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      const dir = resolveSessionDir(config.sessionsDir, id);
+      if (!dir) return reply.code(404).send({ error: 'session_not_found' });
+
+      const roots = localFileRoots({
+        sessionDir: dir,
+        uploadsDir,
+        mediaDir: config.mediaDir,
+      });
+      const found = resolveLocalFile(roots, query.path, MAX_LOCAL_IMAGE_BYTES);
+      if (!found.ok) {
+        return reply
+          .code(localFileStatus(found.reason))
+          .send({ error: found.reason });
+      }
+
+      return reply
+        .header('content-type', found.contentType)
+        .header('cache-control', 'private, no-store')
+        // Same posture as the artifact route: these bytes are agent output
+        // and must never be treated as markup for our own origin.
+        .header('content-security-policy', "sandbox; default-src 'none'")
+        .header('x-content-type-options', 'nosniff')
+        .send(fs.createReadStream(found.file));
+    },
+  );
+
+  // --- Phase 2: write API ------------------------------------------------
+
+  /**
+   * Accept files from the phone and hand back the paths they landed on.
+   *
+   * Upload is a separate step from send, deliberately: the composer shows
+   * chips the moment the OS picker returns, so the bytes are on their way
+   * while the user is still typing, and a send with attachments is a plain
+   * JSON call carrying paths.
+   *
+   * The paths returned here are the ONLY ones a later send will accept --
+   * see `resolveAttachments`. A client cannot name an arbitrary file on the
+   * machine and have it read out to the agent.
+   */
+  /**
+   * Receipts for files this server stored, keyed by the path it handed out.
+   *
+   * Bounded in both directions. Left unbounded (which is how this started)
+   * it is a map that only ever grows in a process meant to run for weeks,
+   * and the bytes behind it accumulate under the uploads root with nothing
+   * ever removing them. Entries age out after UPLOAD_TTL_MS -- comfortably
+   * longer than the pick-then-send window the composer needs -- and the
+   * oldest are evicted past MAX_UPLOAD_RECEIPTS regardless.
+   */
+  const uploadTokens = new Map<string, { saved: SavedUpload; at: number }>();
+
+  const sweepUploads = (now = Date.now()): number => {
+    let dropped = 0;
+    for (const [key, entry] of uploadTokens) {
+      if (now - entry.at < UPLOAD_TTL_MS) continue;
+      uploadTokens.delete(key);
+      dropped += 1;
+      // The agent has long since read (or not read) these; the bytes are
+      // the owner's private files and there is no reason to keep them.
+      try {
+        fs.rmSync(entry.saved.path, { force: true });
+      } catch {
+        // a file already gone is exactly the state we wanted
+      }
+    }
+    // Map iteration is insertion-ordered, so the head is the oldest.
+    while (uploadTokens.size > MAX_UPLOAD_RECEIPTS) {
+      const oldest = uploadTokens.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      uploadTokens.delete(oldest);
+      dropped += 1;
+    }
+    return dropped;
+  };
+
+  const uploadSweeper = setInterval(() => sweepUploads(), UPLOAD_SWEEP_MS);
+  uploadSweeper.unref?.();
+
+  const takeUploads = async (
+    request: FastifyRequest,
+  ): Promise<{ files: SavedUpload[]; error?: string; status?: number }> => {
+    const files: SavedUpload[] = [];
+    try {
+      for await (const part of (request as any).files()) {
+        if (files.length >= MAX_UPLOAD_FILES) {
+          return { files, error: 'too_many_files', status: 413 };
+        }
+        const data: Buffer = await part.toBuffer();
+        // @fastify/multipart flags a stream it had to truncate rather than
+        // throwing, so the cap is checked explicitly too.
+        if (part.file?.truncated || data.length > MAX_UPLOAD_BYTES) {
+          return { files, error: 'file_too_large', status: 413 };
+        }
+        const saved = saveUpload(
+          uploadsDir,
+          part.filename,
+          data,
+          part.mimetype,
+        );
+        uploadTokens.set(saved.path, { saved, at: Date.now() });
+        sweepUploads();
+        files.push(saved);
+      }
+    } catch (err) {
+      if (err instanceof UploadError) {
+        return {
+          files,
+          error: err.code === 'too_large' ? 'file_too_large' : err.code,
+          status: 413,
+        };
+      }
+      // @fastify/multipart enforces its own limits by throwing a coded
+      // error rather than returning, and those are the same two conditions
+      // as above -- so they get the same 413 rather than a generic 400.
+      const code = (err as { code?: string }).code;
+      if (code === 'FST_REQ_FILE_TOO_LARGE') {
+        return { files, error: 'file_too_large', status: 413 };
+      }
+      if (code === 'FST_FILES_LIMIT') {
+        return { files, error: 'too_many_files', status: 413 };
+      }
+      request.log.error({ err }, 'upload failed');
+      return { files, error: 'upload_failed', status: 400 };
+    }
+    if (!files.length) return { files, error: 'no_files', status: 400 };
+    return { files };
+  };
+
+  /** Only paths this server itself handed out are ever passed to the agent. */
+  const resolveAttachments = (raw: unknown): SavedUpload[] => {
+    if (!Array.isArray(raw)) return [];
+    const out: SavedUpload[] = [];
+    for (const value of raw.slice(0, MAX_UPLOAD_FILES)) {
+      const hit = typeof value === 'string' ? uploadTokens.get(value) : undefined;
+      if (hit) out.push(hit.saved);
+    }
+    return out;
+  };
+
+  const uploadReply = async (request: FastifyRequest, reply: any) => {
+    const { files, error, status } = await takeUploads(request);
+    if (error) return reply.code(status || 400).send({ error });
+    return {
+      files: files.map((f) => ({
+        path: f.path,
+        name: f.name,
+        size: f.size,
+        mimeType: f.mimeType,
+      })),
+    };
+  };
+
+  app.post(
+    '/api/sessions/:id/attachments',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      return uploadReply(request, reply);
+    },
+  );
+
+  /** The home composer has no session yet, so uploads are not scoped to one. */
+  app.post(
+    '/api/attachments',
+    { preHandler: requireAuth },
+    async (request, reply) => uploadReply(request, reply),
+  );
+
+  app.post(
+    '/api/sessions/new',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const body = (request.body || {}) as Record<string, unknown>;
+      const text = String(body.text ?? '').trim();
+      const attachments = resolveAttachments(body.attachments);
+      if (!text && !attachments.length) {
+        return reply.code(400).send({ error: 'empty_text' });
+      }
+      if (text.length > MAX_MESSAGE_CHARS) {
+        return reply.code(413).send({ error: 'text_too_long' });
+      }
+      const stored = settings.read();
+      /**
+       * "Confirm before acting", as the composer's switch now means it.
+       *
+       * It used to become `runtimeConfig.finalConfirm = true`, i.e. the
+       * daemon-level mandate to call `request_action_confirmation` -- the
+       * one tool that suspends a session on a prompt no phone can answer.
+       * A switch whose ON position guarantees a dead session is not a
+       * safety feature. It is a stronger line in the preamble instead.
+       */
+      const strictConfirm =
+        typeof body.finalConfirm === 'boolean'
+          ? body.finalConfirm
+          : Boolean(stored.defaultFinalConfirm);
+      try {
+        const { sessionId } = await runner.createSession({
+          // The mobile-session preamble rides on the first prompt only.
+          // It is what stops the agent calling `ask_user_question`, which
+          // suspends the session on a question no phone can answer -- see
+          // preamble.ts. It is stripped back out for display.
+          text: withPreamble(
+            promptWithAttachments(text, attachments.map((f) => f.path)),
+            { strictConfirm },
+          ),
+          // An explicit pick from the composer wins; the stored default is
+          // only consulted when the client sent nothing.
+          model: runner.resolveModel(
+            resolveNewSessionModel(stored, body.model),
+          ),
+          effort: runner.resolveEffort(body.effort ?? stored.defaultEffort),
+        });
+
+        softConfirm.set(sessionId, strictConfirm);
+
+        // A permission choice made on the home composer applies to the
+        // session the send just created. The create-then-update shape is
+        // the same one the Python bridge uses; it binds from the NEXT turn.
+        //
+        // The stored default backs the composer's choice rather than
+        // overriding it, and stays null unless the owner set one -- this
+        // app does not widen permissions on its own. See settings.ts.
+        const mode = isPermissionMode(body.permissionMode)
+          ? body.permissionMode
+          : (stored.defaultPermissionMode ?? undefined);
+        /**
+         * Always OFF, on every session this app creates.
+         *
+         * Not "leave it alone": the account-level default is inherited by
+         * a new session, so an owner who has `finalConfirm` on for their
+         * desktop work gets it on a session started from their phone too
+         * -- and that is a SYSTEM instruction requiring the native
+         * confirmation tool, which outranks the preamble above and bricks
+         * the session the first time the agent touches anything external.
+         * Writing false explicitly is the only way to be sure.
+         *
+         * Residual risk, stated honestly: like every other runtimeConfig
+         * write, this binds on the NEXT `aside exec` spawn. The CLI offers
+         * no flag or environment variable to bind it at create time
+         * (checked against `aside exec --help`), so the very first turn of
+         * a new session still runs under the inherited value. The preamble
+         * is the only cover for that turn -- which is why it names the
+         * tools explicitly rather than just describing the protocol.
+         */
+        void applyPermission(
+          {
+            facade,
+            readRuntimeConfig: async (sid) =>
+              (await stateDb.read(sid)).runtimeConfig,
+          },
+          sessionId,
+          { mode, finalConfirm: false },
+        )
+          .then(() => stateDb.invalidate(sessionId))
+          .catch((err) =>
+            request.log.error({ err }, 'new-session permission apply failed'),
+          );
+
+        return { sessionId, accepted: true, softConfirm: strictConfirm };
+      } catch (err) {
+        request.log.error({ err }, 'new session failed');
+        return reply
+          .code(502)
+          .send({ error: 'session_create_failed', reason: (err as Error).message });
+      }
+    },
+  );
+
+  app.post(
+    '/api/sessions/:id/send',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = (request.body || {}) as Record<string, unknown>;
+      const text = String(body.text ?? '').trim();
+      const attachments = resolveAttachments(body.attachments);
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      if (!text && !attachments.length) {
+        return reply.code(400).send({ error: 'empty_text' });
+      }
+      if (text.length > MAX_MESSAGE_CHARS) {
+        return reply.code(413).send({ error: 'text_too_long' });
+      }
+      if (!sessionMsgFile(config.sessionsDir, id)) {
+        return reply.code(404).send({ error: 'session_not_found' });
+      }
+
+      /**
+       * Refuse rather than jam.
+       *
+       * A session suspended on a native `ask_user_question` accepts an
+       * `aside exec` and then never returns from it -- verified today
+       * against the live CLI. Queuing one turns a recoverable state into a
+       * permanently wedged session, so it is a 409 with a reason the client
+       * can put on screen instead.
+       */
+      stateDb.invalidate(id);
+      const live = await stateDb.read(id);
+      if (isSuspended(live.status)) {
+        return reply.code(409).send({
+          error: 'session_suspended',
+          reason:
+            'This session is waiting on a question that can only be answered from Aside on your computer.',
+        });
+      }
+
+      const { queued } = runner.send(id, {
+        /**
+         * The one-line reminder rides on every follow-up.
+         *
+         * The preamble is on the first message only, and a long session
+         * gets compacted -- the instruction is exactly the kind of
+         * housekeeping a summariser drops, after which the next question
+         * is a native tool call and the session is unrecoverable. See
+         * `MOBILE_FOLLOWUP_REMINDER`. It is appended, so it composes with
+         * the attachment header (which is prepended) and cannot make the
+         * prompt dash-leading.
+         */
+        text: withReminder(
+          promptWithAttachments(text, attachments.map((f) => f.path)),
+          { strictConfirm: softConfirm.has(id) },
+        ),
+        model: runner.resolveModel(body.model),
+        effort: runner.resolveEffort(body.effort),
+      });
+      return { accepted: true, queued, busy: runner.isBusy(id) };
+    },
+  );
+
+  /**
+   * Stop the turn a session is running.
+   *
+   * The server owns the driver child, so this is a kill by PID -- SIGTERM,
+   * then SIGKILL after a grace period (see `STOP_GRACE_MS`). Never a
+   * pattern kill: the owner's live mini app service runs the same binary
+   * with the same argv, and matching on that would take it down.
+   *
+   * Answering 409 when there is nothing running is the honest reply; the
+   * composer re-enables either way.
+   */
+  app.post(
+    '/api/sessions/:id/stop',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      if (!runner.stop(id)) {
+        return reply.code(409).send({ error: 'not_running' });
+      }
+      return { ok: true, stopping: true };
+    },
+  );
+
+  /**
+   * Answer a soft-protocol question by sending the choice as a message.
+   *
+   * Deliberately its own route rather than a plain send: it is the one
+   * place that must never be pointed at a suspended session (a native
+   * pending tool cannot be answered this way, and trying is what hangs a
+   * driver), and having a named endpoint keeps that check in one place.
+   */
+  app.post(
+    '/api/sessions/:id/answer',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = (request.body || {}) as Record<string, unknown>;
+      const label = String(body.label ?? '').trim();
+      const header = String(body.header ?? '').trim();
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      if (!label) return reply.code(400).send({ error: 'empty_answer' });
+      if (!sessionMsgFile(config.sessionsDir, id)) {
+        return reply.code(404).send({ error: 'session_not_found' });
+      }
+
+      stateDb.invalidate(id);
+      const live = await stateDb.read(id);
+      if (isSuspended(live.status)) {
+        return reply.code(409).send({
+          error: 'session_suspended',
+          reason:
+            'This question is waiting on Aside on your computer and cannot be answered from here.',
+        });
+      }
+
+      const { queued } = runner.send(id, {
+        // Same reminder as an ordinary send. Appended, so the answer text
+        // still leads the prompt and the `--` terminator still covers a
+        // label that begins with a dash.
+        text: withReminder(answerMessage(header, label), {
+          strictConfirm: softConfirm.has(id),
+        }),
+        model: runner.resolveModel(body.model),
+        effort: runner.resolveEffort(body.effort),
+      });
+      return { accepted: true, queued, busy: runner.isBusy(id) };
+    },
+  );
+
+  /**
+   * Carry on from a session that is stuck on a desktop-only question.
+   *
+   * There is no unsticking one. The daemon holds it suspended waiting for
+   * an answer over the sidepanel's authenticated channel, and nothing this
+   * server can send reaches that channel -- verified against the live CLI
+   * in every form. So the way forward is sideways: a NEW session, carrying
+   * the full mobile preamble, seeded with what was asked and what the user
+   * just tapped. See `recoveryPrompt`.
+   *
+   * The stuck session is left exactly as it is. It is still readable, and
+   * pretending otherwise would be the same dishonesty the read-only banner
+   * exists to avoid.
+   */
+  app.post(
+    '/api/sessions/:id/recover',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = (request.body || {}) as Record<string, unknown>;
+      const answer = String(body.answer ?? '').trim();
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      const msgFile = sessionMsgFile(config.sessionsDir, id);
+      if (!msgFile) {
+        return reply.code(404).send({ error: 'session_not_found' });
+      }
+
+      // The question comes from the server's own thread build rather than
+      // from the request body: the client could send anything, and what
+      // the new session is told the old one asked has to be true.
+      const question = pendingNativeQuestion(
+        buildThread(readHistory(msgFile), false) as any,
+      );
+      if (!question) {
+        return reply.code(409).send({ error: 'no_pending_question' });
+      }
+
+      const stored = settings.read();
+      const strictConfirm = softConfirm.has(id);
+      const seed = recoveryPrompt({
+        question,
+        answer,
+        firstMessage: stripAgentDirectives(firstUserText(msgFile)),
+      });
+
+      try {
+        const { sessionId } = await runner.createSession({
+          text: withPreamble(seed, { strictConfirm }),
+          model: runner.resolveModel(
+            resolveNewSessionModel(stored, body.model),
+          ),
+          effort: runner.resolveEffort(body.effort ?? stored.defaultEffort),
+        });
+        softConfirm.set(sessionId, strictConfirm);
+        // Same reasoning as the create route: never inherit the account's
+        // native final-confirm onto a session driven from a phone.
+        void applyPermission(
+          {
+            facade,
+            readRuntimeConfig: async (sid) =>
+              (await stateDb.read(sid)).runtimeConfig,
+          },
+          sessionId,
+          {
+            mode: stored.defaultPermissionMode ?? undefined,
+            finalConfirm: false,
+          },
+        )
+          .then(() => stateDb.invalidate(sessionId))
+          .catch((err) =>
+            request.log.error({ err }, 'recovery permission apply failed'),
+          );
+        return { sessionId, accepted: true, from: id };
+      } catch (err) {
+        request.log.error({ err }, 'recovery session failed');
+        return reply
+          .code(502)
+          .send({ error: 'session_create_failed', reason: (err as Error).message });
+      }
+    },
+  );
+
+  // --- settings ----------------------------------------------------------
+
+  app.get('/api/settings', { preHandler: requireAuth }, async () => ({
+    settings: settings.read(),
+  }));
+
+  /**
+   * Partial update. Only the keys the body carries are touched, so a client
+   * that knows about one field cannot blank the others.
+   */
+  app.post(
+    '/api/settings',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const body = request.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return reply.code(400).send({ error: 'bad_body' });
+      }
+      return { settings: settings.write(body) };
+    },
+  );
+
+  /**
+   * Change a session's permission mode and/or its confirm-before-acting
+   * toggle.
+   *
+   * Honest about scope: the daemon reads both when it spawns the next
+   * `aside exec`, so a change takes effect from the next message rather
+   * than reaching into a turn already running. The UI says the same.
+   *
+   * The confirm toggle forks on where the session came from. On one this
+   * app or bridge.py started -- a session being DRIVEN FROM A PHONE -- the
+   * native `finalConfirm` flag is never set true, because it is the
+   * daemon-level mandate to call `request_action_confirmation` and that
+   * tool can only be answered from the desktop sidepanel. Turning a safety
+   * switch on must not be the thing that kills the session. It writes the
+   * soft flag instead (see softconfirm.ts), which becomes a stronger line
+   * in the preamble and in every follow-up reminder.
+   *
+   * On a session started at the owner's desk the sidepanel IS there, so
+   * the switch keeps its original meaning and writes the daemon's flag.
+   */
+  app.post(
+    '/api/sessions/:id/permission',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = (request.body || {}) as Record<string, unknown>;
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      if (!sessionMsgFile(config.sessionsDir, id)) {
+        return reply.code(404).send({ error: 'session_not_found' });
+      }
+
+      const hasMode = body.mode !== undefined;
+      const hasConfirm = body.finalConfirm !== undefined;
+      if (!hasMode && !hasConfirm) {
+        return reply.code(400).send({ error: 'nothing_to_change' });
+      }
+      if (hasMode && !isPermissionMode(body.mode)) {
+        return reply.code(400).send({ error: 'bad_mode' });
+      }
+      if (hasConfirm && typeof body.finalConfirm !== 'boolean') {
+        return reply.code(400).send({ error: 'bad_final_confirm' });
+      }
+
+      const mobile = isMobileSession(config.sessionsDir, id);
+      const wanted = hasConfirm ? (body.finalConfirm as boolean) : undefined;
+      if (hasConfirm && mobile) softConfirm.set(id, Boolean(wanted));
+
+      try {
+        await applyPermission(
+          {
+            facade,
+            readRuntimeConfig: async (sid) =>
+              (await stateDb.read(sid)).runtimeConfig,
+          },
+          id,
+          {
+            mode: hasMode ? (body.mode as any) : undefined,
+            // On a mobile session the native flag is forced OFF rather
+            // than left alone: it may already be true, inherited from the
+            // account default, and this is the moment to clear it.
+            finalConfirm: hasConfirm ? (mobile ? false : wanted) : undefined,
+          },
+        );
+      } catch (err) {
+        request.log.error({ err }, 'permission update failed');
+        return reply.code(502).send({ error: 'permission_update_failed' });
+      }
+
+      // The write went through the daemon, so every cached read of this
+      // session is now stale.
+      stateDb.invalidate(id);
+      facade.invalidate(`session:${id}`);
+
+      const state = await stateDb.read(id);
+      return {
+        ok: true,
+        permission: state.permission,
+        permissionMode: state.permissionMode,
+        /**
+         * What the switch shows. On a mobile session that is the soft flag
+         * -- reporting the daemon's (always false) value would flick the
+         * switch back off under the owner's thumb.
+         */
+        finalConfirm: mobile ? softConfirm.has(id) : state.finalConfirm,
+        /** True when the toggle means the soft protocol, not the daemon's. */
+        softConfirm: mobile,
+        fullAccess: isFullAccess(state.permission),
+        /** The change binds on the next spawn, not on the running turn. */
+        appliesFrom: 'next-message',
+      };
+    },
+  );
+
+  app.get('/api/status', { preHandler: requireAuth }, async () => {
+    const status = runner.status();
+
+    // Aside's own current default, so the pills open showing what the
+    // browser shows rather than a config guess.
+    //
+    // Three sources, most authoritative first. The daemon is asked first
+    // because it is the live answer, but it needs a ~139MB process spawn
+    // and fails whenever the desktop app is not running -- and it was
+    // failing to `claude-code` + whatever stale string the bridge config
+    // carried, which is how the phone came to show a model the desktop had
+    // not used in days. settings.json is the same value the daemon would
+    // have reported, read straight off disk, so it is a far better second
+    // than the hand-maintained config.
+    const daemonDefault = await fetchDefaultModel(facade).catch(() => null);
+    const desktop = readDesktopState(config.sessionsDir);
+    const fallback = desktop.defaultModel;
+
+    /*
+     * A phone-side override outranks everything above it.
+     *
+     * Not for correctness of the pill alone -- for honesty. `resolveNewSessionModel`
+     * already prefers this override when it starts a session, so a status
+     * route that ignored it advertised one model in the composer and then
+     * ran a different one. The pill has to name the model that will
+     * actually answer, or it is worse than no pill.
+     */
+    const override = settings.read();
+    const hasOverride = Boolean(
+      override.defaultProvider && override.defaultModelId,
+    );
+
+    const provider = hasOverride
+      ? override.defaultProvider
+      : daemonDefault?.provider || fallback?.provider || 'claude-code';
+    const modelId = hasOverride
+      ? override.defaultModelId
+      : daemonDefault?.modelId || fallback?.modelId || config.defaultModel;
+    const effort =
+      (hasOverride && override.defaultEffort) ||
+      daemonDefault?.thinkingLevel ||
+      fallback?.thinkingLevel ||
+      config.defaultEffort;
+
+    return {
+      uptimeMs: Date.now() - startedAt,
+      inFlight: status.inFlight,
+      queued: status.queued,
+      catalog,
+      efforts: EFFORT_LEVELS,
+      /** What the Reasoning popover offers, in Aside's order. */
+      effortMenu: EFFORT_MENU.map((id) => ({ id, label: EFFORT_LABELS[id] })),
+      /** What the Permission popover offers, in Aside's order. */
+      permissionMenu: PERMISSION_MENU,
+      uploads: { maxFiles: MAX_UPLOAD_FILES, maxBytes: MAX_UPLOAD_BYTES },
+      defaults: {
+        provider,
+        modelId,
+        modelLabel: modelLabel(catalog, provider, modelId),
+        effort,
+        effortLabel: EFFORT_LABELS[effort] || effort,
+      },
+      permission: process.env.MINIAPP_GRANT_FULL_ACCESS === '1'
+        ? 'Full access'
+        : 'Guard',
+      /**
+       * What the settings screen's Connection section reports.
+       *
+       * Deliberately free of anything sensitive: no token, no user id, no
+       * absolute paths. `bridgeRunning` is inferred from whether the Python
+       * bridge's config directory is on disk, which is all this process can
+       * honestly say about a service it does not own.
+       */
+      service: {
+        version: opts.version || '',
+        /** `cloudflared` or `none`, straight from the config. */
+        tunnel: config.miniapp.tunnel,
+        tunnelUrl: opts.publicUrl?.() || null,
+        port: config.port,
+        // The daemon answering the facade at all is the useful signal.
+        asideReachable: daemonDefault !== null,
+        bridgeConfigured: fs.existsSync(
+          path.join(config.miniapp.stateDir, 'config.json'),
+        ),
+      },
+    };
+  });
+
+  // --- SPA hosting -------------------------------------------------------
+  if (opts.webDist && fs.existsSync(opts.webDist)) {
+    await app.register(fastifyStatic, { root: opts.webDist });
+
+    /**
+     * Standalone entry for the installed app.
+     *
+     * Same bundle as `/`, one tag lighter. Loading Telegram's bridge script
+     * outside Telegram is actively harmful rather than merely useless: it
+     * defines `window.Telegram.WebApp.CloudStorage`, whose callbacks are
+     * answered by the Telegram host and by nothing else. Off-Telegram those
+     * promises never settle, so the boot `await cloudStorage.getItem(...)`
+     * hangs and the app sits on its spinner forever. With the tag gone the
+     * shim's own fallbacks (localStorage, window.confirm, no-op haptics)
+     * take over and everything works.
+     */
+    const indexPath = path.join(opts.webDist, 'index.html');
+    let standaloneHtml: string | null = null;
+    let standaloneMtime = 0;
+
+    app.get('/app', async (_request, reply) => {
+      const mtime = fs.statSync(indexPath).mtimeMs;
+      if (!standaloneHtml || mtime !== standaloneMtime) {
+        standaloneMtime = mtime;
+        standaloneHtml = fs
+          .readFileSync(indexPath, 'utf8')
+          .replace(
+            /<script src="https:\/\/telegram\.org\/js\/telegram-web-app\.js"><\/script>/,
+            '<!-- standalone build: Telegram bridge deliberately omitted -->',
+          )
+          .replace(
+            '</head>',
+            [
+              '  <link rel="manifest" href="/manifest.webmanifest" />',
+              '  <meta name="theme-color" content="#faf9f6" />',
+              '  <meta name="mobile-web-app-capable" content="yes" />',
+              '  <meta name="apple-mobile-web-app-capable" content="yes" />',
+              /*
+               * `default`, not `black-translucent`.
+               *
+               * Translucent is the one that looks better in screenshots:
+               * the page runs edge to edge underneath the clock and
+               * battery. It also requires the layout to pad itself by
+               * `env(safe-area-inset-top)`, and this one does not -- every
+               * inset it honours is a bottom inset. Choosing translucent
+               * would slide the top of the header under the status bar on
+               * every notched iPhone. `default` leaves iOS to reserve that
+               * strip and tint it with the theme colour.
+               */
+              '  <meta name="apple-mobile-web-app-status-bar-style" content="default" />',
+              '  <meta name="apple-mobile-web-app-title" content="Aside" />',
+              /*
+               * The purpose-built 180x180, which is the size iOS asks for.
+               * This pointed at the 192x192 PWA icon, which works only
+               * because iOS rescales it, and rescaling a rounded-square app
+               * icon is exactly where softness shows.
+               */
+              '  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />',
+              ...APPLE_LAUNCH_SCREENS,
+              '</head>',
+            ].join('\n'),
+          );
+      }
+      return reply.type('text/html; charset=utf-8').send(standaloneHtml);
+    });
+
+    /**
+     * Pairing page. Loopback only.
+     *
+     * The pairing key is a credential, so it is never printed to a chat, a
+     * log, or a notification. It is shown once, on the machine that owns it,
+     * to a person sitting in front of that machine. The QR code exists so the
+     * key gets to the phone without anyone reading a 32-character hex string
+     * out loud.
+     *
+     * Binding this to loopback means it is unreachable over the tailnet, so a
+     * device that is already on the network still cannot mint itself a token
+     * without physical access to the Mac.
+     */
+    app.get('/pair', async (request, reply) => {
+      const ip = String(request.ip || '');
+      const isLoopback =
+        ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+      if (!isLoopback) {
+        return reply.code(403).type('text/html').send(
+          '<!doctype html><meta charset=utf-8><body style="font:16px system-ui;padding:2rem">' +
+            '<h1>Not here</h1><p>Open this page on the Mac itself: ' +
+            `<code>http://127.0.0.1:${config.port}/pair</code></p></body>`,
+        );
+      }
+
+      const host = opts.tailnetHost?.() || '';
+      const base = host ? `https://${host}` : `http://127.0.0.1:${config.port}`;
+      const link = `${base}/app#pair=${pairingKey}`;
+      const qr = await QRCode.toDataURL(link, {
+        errorCorrectionLevel: 'M',
+        margin: 1,
+        width: 320,
+        color: { dark: '#3d3a34', light: '#f6f3ee' },
+      });
+
+      return reply.type('text/html; charset=utf-8').send(`<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pair your phone</title>
+<style>
+  body{font:16px/1.55 -apple-system,system-ui,sans-serif;background:#f6f3ee;color:#3d3a34;
+       margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}
+  .card{max-width:26rem;text-align:center}
+  h1{font-family:ui-serif,'New York',Georgia,serif;font-weight:500;font-size:1.6rem;margin:0 0 .35rem}
+  p{margin:.4rem 0;color:#6f6961}
+  img{display:block;margin:1.5rem auto;border-radius:14px;box-shadow:0 2px 20px rgba(0,0,0,.09)}
+  ol{text-align:left;color:#6f6961;padding-left:1.15rem;margin:1.25rem 0 0}
+  li{margin:.4rem 0}
+  code{background:#e9e4db;padding:.12em .4em;border-radius:5px;font-size:.9em}
+  .warn{margin-top:1.5rem;font-size:.85rem;color:#8a8378;border-top:1px solid #e2ddd4;padding-top:1rem}
+</style>
+<div class="card">
+  <h1>Pair your phone</h1>
+  <p>Scan with the phone you want to use Aside on.</p>
+  <img src="${qr}" width="320" height="320" alt="Pairing QR code">
+  <ol>
+    <li>Make sure Tailscale is installed and signed in on the phone.</li>
+    <li>Scan the code. It opens Aside and pairs in one step.</li>
+    <li>In Chrome, tap the menu and choose <b>Add to Home screen</b>.</li>
+    <li>Launch it from the icon from now on.</li>
+  </ol>
+  <p class="warn">This link is a key to your Mac. Anyone who has it and is on
+  your tailnet can use your agent. Reload this page to see it again; it does
+  not expire on its own.</p>
+</div>`);
+    });
+
+    app.setNotFoundHandler((request, reply) => {
+      if (request.url.startsWith('/api') || request.url.startsWith('/ws')) {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+      return reply.sendFile('index.html');
+    });
+  }
+
+  /**
+   * Inbound side of the Day 2 control loop (plan 6.2/6.3).
+   *
+   * bridge.py owns the ONLY `getUpdates` poller against this bot token
+   * (see 4.2 -- a second poller steals the first one's updates). When a
+   * tap lands on one of THIS app's push notifications, bridge.py relays
+   * the callback data here rather than acting on it itself.
+   *
+   * Gated by loopback origin plus a shared secret -- the same HS256
+   * signing secret this server already keeps at `config.secretPath` --
+   * rather than a bearer JWT, because the caller is a local process on the
+   * same machine, not a phone that went through /api/auth.
+   */
+  app.post('/api/internal/callback', async (request, reply) => {
+    const ip = String(request.ip || '');
+    const fromLoopback =
+      ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    if (!fromLoopback) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+    const given = Buffer.from(String(request.headers['x-internal-secret'] || ''));
+    const expected = Buffer.from(opts.jwtSecret);
+    const authorized =
+      given.length === expected.length && crypto.timingSafeEqual(given, expected);
+    if (!authorized) {
+      return reply.code(403).send({ error: 'forbidden' });
+    }
+
+    const body = (request.body || {}) as { data?: string };
+    const data = String(body.data || '');
+
+    if (data.startsWith('stop:')) {
+      const id = data.slice('stop:'.length);
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      const stopped = runner.stop(id);
+      if (stopped) void notifier.resolveInPlace(id, '⏹ Stopped from Telegram.');
+      return { ok: true, stopped };
+    }
+
+    if (data.startsWith('q:')) {
+      const [, sessionId, questionId, indexRaw] = data.split(':');
+      if (!sessionId || !isValidSessionId(sessionId)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      const msgFile = sessionMsgFile(config.sessionsDir, sessionId);
+      if (!msgFile || !fs.existsSync(msgFile)) {
+        return reply.code(404).send({ error: 'session_not_found' });
+      }
+      const busy = runner.isBusy(sessionId);
+      const snapshot = threads.build(
+        sessionId,
+        msgFile,
+        busy,
+        subagents.snapshot(sessionId, busy),
+      );
+      const item = snapshot.items.find(
+        (candidate) => candidate.kind === 'question' && candidate.id === questionId,
+      );
+      if (
+        !item ||
+        item.kind !== 'question' ||
+        item.status !== 'pending' ||
+        !item.answerable
+      ) {
+        // Already answered -- most likely from the mini app itself while
+        // the push was in flight -- or stale. Say so instead of
+        // double-sending a follow-up the agent never asked for again.
+        void notifier.resolveInPlace(
+          sessionId,
+          'This question was already answered.',
+        );
+        return { ok: true, stale: true };
+      }
+      const block = item.questions[0];
+      const option = block?.options[Number(indexRaw)];
+      if (!block || !option) {
+        return reply.code(400).send({ error: 'bad_option' });
+      }
+      runner.send(sessionId, {
+        text: withReminder(answerMessage(block.header, option.label), {
+          strictConfirm: softConfirm.has(sessionId),
+        }),
+        model: runner.resolveModel(undefined),
+        effort: runner.resolveEffort(undefined),
+      });
+      void notifier.resolveInPlace(
+        sessionId,
+        `${block.header ? `${block.header}: ` : ''}${option.label} ✓`,
+      );
+      return { ok: true };
+    }
+
+    return reply.code(400).send({ error: 'unknown_callback' });
+  });
+
+  // --- Day 3: the browser surfaces (plan section 7) ----------------------
+  // Every route here goes through the same facade every read in this file
+  // already uses -- no new transport, no new failure mode.
+  const captureGate = new CaptureGate();
+
+  const isValidTargetId = (value: unknown): value is string =>
+    typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value);
+
+  const sendBrowserError = (reply: any, err: unknown) => {
+    if (err instanceof BrowserError) {
+      const status =
+        err.code === 'bad_url'
+          ? 400
+          : err.code === 'not_found'
+            ? 404
+            : err.code === 'rate_limited'
+              ? 429
+              : err.code === 'capture_busy'
+                ? 409
+                : 502;
+      return reply.code(status).send({ error: err.code, message: err.message });
+    }
+    app.log.warn({ err }, 'browser route failed');
+    return reply.code(502).send({ error: 'upstream' });
+  };
+
+  app.get('/api/tabs', { preHandler: requireAuth }, async () => ({
+    tabs: await listTabs(facade),
+  }));
+
+  app.post(
+    '/api/tabs',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const body = (request.body || {}) as { url?: string };
+      try {
+        const opened = await openNewTab(facade, String(body.url || ''));
+        return opened;
+      } catch (err) {
+        return sendBrowserError(reply, err);
+      }
+    },
+  );
+
+  app.delete(
+    '/api/tabs/:targetId',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { targetId } = request.params as { targetId: string };
+      if (!isValidTargetId(targetId)) {
+        return reply.code(400).send({ error: 'bad_target_id' });
+      }
+      try {
+        const closed = await closeBrowserTab(facade, targetId);
+        return { closed };
+      } catch (err) {
+        return sendBrowserError(reply, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/tabs/:targetId/capture',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { targetId } = request.params as { targetId: string };
+      if (!isValidTargetId(targetId)) {
+        return reply.code(400).send({ error: 'bad_target_id' });
+      }
+      const query = request.query as { q?: string };
+      const quality = Number(query.q) || undefined;
+      try {
+        const result = await captureGate.run(targetId, () =>
+          captureTab(facade, targetId, { quality }),
+        );
+        return {
+          dataUrl: `data:image/webp;base64,${result.base64}`,
+          url: result.url,
+          capturedAt: result.capturedAt,
+        };
+      } catch (err) {
+        return sendBrowserError(reply, err);
+      }
+    },
+  );
+
+  app.get(
+    '/api/tabs/:targetId/snapshot',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { targetId } = request.params as { targetId: string };
+      if (!isValidTargetId(targetId)) {
+        return reply.code(400).send({ error: 'bad_target_id' });
+      }
+      try {
+        return await snapshotTab(facade, targetId);
+      } catch (err) {
+        return sendBrowserError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * The same capture as `/capture`, but as raw `image/webp` bytes behind a
+   * real URL rather than JSON -- what an `<img src>` and Telegram's own
+   * `shareToStory` (plan 8.6, which fetches media server-side and does
+   * NOT accept a `data:` URL) both need. `requireAuthOrQueryToken` because
+   * this is loaded by the browser/Telegram's own fetcher, not by this
+   * app's `fetch()` wrapper, so a header-based bearer token is not an
+   * option -- same reasoning as the existing artifact download route.
+   */
+  app.get(
+    '/api/tabs/:targetId/capture.webp',
+    { preHandler: requireAuthOrQueryToken },
+    async (request, reply) => {
+      const { targetId } = request.params as { targetId: string };
+      if (!isValidTargetId(targetId)) {
+        return reply.code(400).send({ error: 'bad_target_id' });
+      }
+      const query = request.query as { q?: string };
+      const quality = Number(query.q) || undefined;
+      try {
+        const result = await captureGate.run(targetId, () =>
+          captureTab(facade, targetId, { quality }),
+        );
+        reply.header('cache-control', 'no-store');
+        return reply
+          .type('image/webp')
+          .send(Buffer.from(result.base64, 'base64'));
+      } catch (err) {
+        return sendBrowserError(reply, err);
+      }
+    },
+  );
+
+  // --- Day 4: depth (plan section 8) --------------------------------------
+
+  /** Read-only memory browser (8.1). No write route exists anywhere in this file, on purpose -- see memorybrowser.ts's own header. */
+  const memoryRoot = path.join(defaultAsideRoot(), 'memory');
+
+  app.get('/api/memory', { preHandler: requireAuth }, async () => ({
+    tree: buildMemoryTree(memoryRoot),
+  }));
+
+  app.get(
+    '/api/memory/file',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const query = request.query as { path?: string };
+      const file = resolveMemoryFile(memoryRoot, query.path);
+      if (!file) return reply.code(404).send({ error: 'not_found' });
+      try {
+        return { content: readMemoryFile(file) };
+      } catch {
+        return reply.code(404).send({ error: 'not_found' });
+      }
+    },
+  );
+
+  /**
+   * Read-only routines (8.2). The facade's own surface is `list`/`get`
+   * ONLY -- verified against the live daemon, see the build plan's section
+   * 1.4. Create/update/delete (and, in practice, pause/resume: the facade
+   * exposes no mutation at all) would need a full `aside exec` turn calling
+   * the `routine_update` tool, which is a different cost model entirely and
+   * is deliberately not wired up here.
+   */
+  app.get('/api/routines', { preHandler: requireAuth }, async () => ({
+    routines: await fetchRoutines(facade),
+  }));
+
+  /** Full-text search across transcripts on disk (8.7). */
+  app.get(
+    '/api/search',
+    { preHandler: requireAuth },
+    async (request) => {
+      const query = request.query as { q?: string };
+      return { hits: searchTranscripts(config.sessionsDir, String(query.q || '')) };
+    },
+  );
+
+  /**
+   * PDF text (8.3), scoped to a session's own artifacts/attachments --
+   * exactly the same containment `resolveArtifact` already gives the
+   * download route, so this adds no new filesystem surface.
+   */
+  app.get(
+    '/api/sessions/:id/pdf',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const query = request.query as { path?: string; group?: string };
+      if (!isValidSessionId(id)) {
+        return reply.code(400).send({ error: 'bad_session_id' });
+      }
+      const group: ArtifactGroup = isArtifactGroup(query.group)
+        ? query.group
+        : 'artifacts';
+      const dir = resolveSessionDir(config.sessionsDir, id);
+      if (!dir) return reply.code(404).send({ error: 'session_not_found' });
+      const file = resolveArtifact(dir, group, String(query.path ?? ''));
+      if (!file || path.extname(file).toLowerCase() !== '.pdf') {
+        return reply.code(403).send({ error: 'forbidden_path' });
+      }
+      try {
+        const text = await facade.mutate(
+          `aside.pdf.read(${JSON.stringify(file)})`,
+        );
+        return { text };
+      } catch (err) {
+        app.log.warn({ err }, 'pdf read failed');
+        return reply.code(502).send({ error: 'pdf_read_failed' });
+      }
+    },
+  );
+
+  attachWebSocket({
+    app,
+    config,
+    runner,
+    watchers,
+    threads,
+    subagents,
+    jwtSecret: opts.jwtSecret,
+    viewers,
+  });
+
+  app.addHook('onClose', async () => {
+    clearInterval(uploadSweeper);
+    watchers.closeAll();
+    runner.shutdown();
+  });
+
+  return { app, runner, watchers, subagents };
+}
