@@ -392,6 +392,9 @@ export async function buildServer(
   const viewers = new ActiveViewers();
   const notifier = new Notifier({
     botToken: config.botToken,
+    // Nothing to push to without a bot. The Notifier still runs so mute
+    // state and read tracking behave the same; it just never calls out.
+    enabled: !config.standalone,
     chatId: config.allowedUserId,
     stateDir: config.miniapp.stateDir,
     deepLinkBase: config.miniapp.deepLinkBase,
@@ -983,6 +986,18 @@ export async function buildServer(
     '/api/auth',
     { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
     async (request, reply) => {
+      /*
+       * Refused outright without a bot token, and this is load-bearing.
+       *
+       * `validateInitData` HMACs with the bot token as the key. An empty
+       * token is a key everyone knows, so accepting this route in
+       * standalone mode would let anyone who can reach the port mint a
+       * full session. Pairing is the only bootstrap when there is no
+       * Telegram identity to check.
+       */
+      if (config.standalone) {
+        return reply.code(404).send({ error: 'telegram_not_configured' });
+      }
       const body = (request.body || {}) as { initDataRaw?: unknown };
       try {
         const validated = validateInitData(

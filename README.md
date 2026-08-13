@@ -20,13 +20,18 @@ well, it lives there.
 
 ## Handing this to an AI agent
 
-This is written to be executed top to bottom without questions. Give an
-agent the repo link and say:
+[AGENTS.md](AGENTS.md) is the procedure, written for an agent rather than a
+reader: every step has a check, and it says where a human is genuinely
+needed. Give an agent the repo link and say:
 
-> Set up the standalone mobile app. Follow the README top to bottom. Ask me
-> only when you need a password, my phone in my hand, or a decision.
+> Set this up. Follow AGENTS.md top to bottom. Ask me only when you need a
+> password, my phone in my hand, or a decision.
 
-Every step says how to check it worked.
+When it is done, `cd miniapp && npm run doctor` verifies the whole install
+and exits with the number of failures.
+
+The rest of this README is the same thing for a person, with more of the
+reasoning.
 
 ---
 
@@ -62,10 +67,16 @@ Apple Silicon puts Homebrew in `/opt/homebrew`, which is not on the default
 ```bash
 git clone https://github.com/Parthkkk/aside-mobile.git ~/aside-mobile
 cd ~/aside-mobile/miniapp
-npm install
+npm run setup
 ```
 
-Covers `server/` and `web/` together. A couple of minutes.
+Installs both workspaces, builds the server and the web app, then runs the
+doctor. A couple of minutes.
+
+No configuration file is needed. A fresh clone runs in standalone mode: no
+Telegram, no bot token, pairing from the loopback page. If `npm install`
+dies inside `esbuild` with a SIGKILL, macOS quarantined the download; run
+`xattr -dr com.apple.quarantine node_modules && npm rebuild esbuild`.
 
 ## 3. Tailscale
 
@@ -108,13 +119,13 @@ Put the server behind it:
 
 ```bash
 cd ~/aside-mobile/miniapp/server
-npm run build
 npm start
 ```
 
 First run generates its own signing secret at
-`~/.aside-telegram-bridge/miniapp-secret.json`, `chmod 600`. It never enters
-the repo.
+`~/.aside-mobile/miniapp-secret.json`, `chmod 600`. It never enters the
+repo. (A machine that also runs the Telegram bridge keeps using the
+bridge's own state directory instead, so the two do not collide.)
 
 ```bash
 curl -s http://127.0.0.1:8790/api/health              # {"ok":true}
@@ -129,8 +140,17 @@ The phone needs the Mac awake and the server running.
 
 - **Stop the Mac sleeping.** [Amphetamine](https://apps.apple.com/app/amphetamine/id937984704)
   is free, or System Settings, Battery, prevent sleeping while on power.
-- **Keep the server alive.** Leave `npm start` in a terminal, or install a
-  launchd job so it survives a reboot.
+- **Keep the server alive.** Leave `npm start` in a terminal, or install the
+  launchd job so it survives a reboot:
+
+  ```bash
+  cd ~/aside-mobile/miniapp
+  npm run launchd            # npm run launchd -- off  to remove
+  ```
+
+  It writes `~/Library/LaunchAgents/com.aside.mobile.plist`, starts the job,
+  and waits until the server actually answers before reporting success.
+  Logs land in `~/Library/Logs/com.aside.mobile.log`.
 
 ## 5. Pair
 
@@ -307,11 +327,14 @@ make the Android behaviour unavailable.
 ## Layout
 
 ```
+AGENTS.md          Setup procedure, written to be executed by an agent
 miniapp/
   server/    Fastify API on :8790, talks to the Aside daemon
+             (the pairing page is a second listener on :8791, loopback only)
   web/       React + Vite front end, and the Capacitor Android shell
     android/ Native project; GeckoView lives in BrowserActivity.java
     scripts/ gen-splash.mjs regenerates the iOS launch screens
+  scripts/   doctor.mjs verifies an install; install-launchd.mjs keeps it up
 build-android.sh   Builds and publishes the APK
 ```
 
@@ -320,7 +343,8 @@ per-machine under `~/.aside-telegram-bridge/`. It is not part of this repo.
 
 ```bash
 cd miniapp/web && npx vitest run      # 198 tests
-cd miniapp/server && npx vitest run   # 525 tests
+cd miniapp/server && npx vitest run   # 539 tests
+cd miniapp && npm run doctor          # verifies a real install end to end
 ```
 
 ---
@@ -337,6 +361,11 @@ cd miniapp/server && npx vitest run   # 525 tests
   pairing key so a fresh install self-pairs. On a solo tailnet that is fine.
   If you ever share the tailnet, stop publishing it there: anyone who can
   download the APK can read the key out of `assets/capacitor.config.json`.
+- Telegram is off unless you configure it, and `/api/auth` is refused
+  outright in that state. That route validates Telegram's `initData` by
+  HMAC with the bot token as the key, so an empty token would be a key
+  anyone can reproduce. No token means no route, and pairing is the only
+  way in.
 - The signing secret is per-install, `chmod 600`, outside the repo, and
   gitignored.
 - Sessions are JWTs with a cookie fallback, so an evicted browser store does

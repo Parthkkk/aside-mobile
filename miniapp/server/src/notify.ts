@@ -95,6 +95,13 @@ function questionKeyboard(
 
 export interface NotifierOptions {
   botToken: string;
+  /**
+   * False in standalone mode (no Telegram configured). Every outbound call
+   * short-circuits; the rest of the class -- mute state, dedupe, viewer
+   * accounting -- behaves identically, so nothing downstream needs to know
+   * whether a push actually went anywhere.
+   */
+  enabled?: boolean;
   chatId: number;
   /** Directory to keep `notify-state.json` in; typically `config.miniapp.stateDir`. */
   stateDir: string;
@@ -151,6 +158,7 @@ export class Notifier {
     params: Record<string, unknown>,
   ): Promise<any> {
     if (this.opts.call) return this.opts.call(method, params);
+    if (this.opts.enabled === false) return null;
     const res = await fetch(
       `https://api.telegram.org/bot${this.opts.botToken}/${method}`,
       {
@@ -352,6 +360,7 @@ export class Notifier {
         });
         return;
       }
+      if (this.opts.enabled === false) return;
       await fetch(
         `https://api.telegram.org/bot${this.opts.botToken}/sendPhoto`,
         { method: 'POST', body: form },

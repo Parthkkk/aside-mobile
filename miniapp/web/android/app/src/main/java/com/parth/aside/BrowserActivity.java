@@ -254,6 +254,16 @@ public class BrowserActivity extends AppCompatActivity {
         final String url = intent.getStringExtra(EXTRA_URL);
         if (url == null || url.isEmpty()) return;
         /*
+         * Defence in depth. This activity is not exported and the only
+         * caller today is MainActivity, which already checks. Re-checking
+         * here means a future caller cannot turn this into a `file:` or
+         * `javascript:` loader by passing a different extra.
+         */
+        if (!MainActivity.isWebUrl(android.net.Uri.parse(url))) {
+            finish();
+            return;
+        }
+        /*
          * Each search from the address bar is a fresh trip.
          *
          * The session is reused for speed, which means it still holds the

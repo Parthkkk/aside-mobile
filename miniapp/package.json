@@ -15,9 +15,15 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "start": "node server/dist/index.js",
-    "initdata": "node scripts/dev-initdata.mjs"
+    "initdata": "node scripts/dev-initdata.mjs",
+    "setup": "npm install && npm run build && npm run doctor",
+    "doctor": "node scripts/doctor.mjs",
+    "launchd": "node scripts/install-launchd.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

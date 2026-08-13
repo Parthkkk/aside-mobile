@@ -162,7 +162,16 @@ export interface MiniappSection {
 export interface MiniappConfig {
   /** Telegram bot token. HMAC key material only -- never logged, never sent. */
   botToken: string;
-  /** The only Telegram user id allowed to use this server. */
+  /**
+   * No Telegram at all: no bot token, so no initData auth and no pushes.
+   * The installed app pairs from the loopback pairing page instead. This
+   * is the default for a fresh clone.
+   */
+  standalone: boolean;
+  /**
+   * The only user id allowed to use this server. A Telegram user id when
+   * one is configured, `STANDALONE_OWNER_ID` otherwise.
+   */
   allowedUserId: number;
   defaultModel: string;
   defaultEffort: EffortLevel;
@@ -227,6 +236,21 @@ function normalizeTunnelHostname(raw: string): string {
  * both the old behaviour and the correct answer for a single-account
  * install.
  */
+/**
+ * Owner id used when there is no Telegram account to borrow one from.
+ *
+ * Any stable non-zero number works; `chat_id` is validated as non-zero, so
+ * this can never collide with a configured Telegram id.
+ */
+export const STANDALONE_OWNER_ID = 1;
+
+/** Where a Telegram-less install keeps its secret, state and media. */
+export function defaultStandaloneStateDir(home = os.homedir()): string {
+  const override = process.env.MINIAPP_STATE_DIR;
+  if (override) return expandHome(override);
+  return path.join(home, '.aside-mobile');
+}
+
 export function defaultAsideRoot(home = os.homedir()): string {
   const override = process.env.MINIAPP_ASIDE_ROOT;
   if (override) return expandHome(override);
@@ -289,25 +313,44 @@ export function loadConfig(): MiniappConfig {
   let raw: Record<string, unknown>;
   try {
     raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
-  } catch (err) {
-    const tried = configCandidates();
-    const where = tried.length > 1
-      ? ` (looked in: ${tried.join(', ')})`
-      : '';
-    throw new Error(
-      `cannot read miniapp config at ${file}: ${(err as Error).message}` +
-        `${where}. Run the bridge setup first (python3 setup.py), or set ` +
-        'MINIAPP_CONFIG to your config.json.',
-    );
+  } catch {
+    /*
+     * No config file. That used to be fatal, which made the whole repo
+     * unusable for its own headline case: someone who wants the phone app
+     * and has never run the Telegram bridge. Telegram is one way in, not
+     * the product. Missing config means standalone mode -- pair from the
+     * loopback pairing page and everything works.
+     */
+    raw = {};
   }
 
   const botToken = String(raw.token || '');
-  if (!botToken) throw new Error(`config ${file} has no "token"`);
 
-  const allowedUserId = Number(raw.chat_id);
-  if (!Number.isFinite(allowedUserId) || allowedUserId === 0) {
-    throw new Error(`config ${file} has no usable numeric "chat_id"`);
+  /*
+   * Standalone: no bot token, so there is no Telegram identity to trust.
+   *
+   * This is a security boundary, not a convenience flag. `validateInitData`
+   * HMACs with the bot token as the key, so an EMPTY token means the key is
+   * public knowledge and anyone could forge a launch that mints a session.
+   * `/api/auth` is therefore refused outright in this mode (see app.ts) and
+   * pairing is the only bootstrap.
+   */
+  const standalone = !botToken;
+
+  const configuredUserId = Number(raw.chat_id);
+  const hasUserId = Number.isFinite(configuredUserId) && configuredUserId !== 0;
+  if (!standalone && !hasUserId) {
+    throw new Error(
+      `config ${file} has a "token" but no usable numeric "chat_id". ` +
+        'Both are needed for Telegram mode; remove the token for standalone.',
+    );
   }
+  /*
+   * A stable synthetic owner id in standalone mode. Every token this server
+   * mints carries it and every check compares against it, so the identity
+   * spine is unchanged -- it simply is not a Telegram user id.
+   */
+  const allowedUserId = hasUserId ? configuredUserId : STANDALONE_OWNER_ID;
 
   const sessionsDir = expandHome(
     process.env.MINIAPP_SESSIONS_DIR ||
@@ -319,7 +362,10 @@ export function loadConfig(): MiniappConfig {
   );
   const secretPath = expandHome(
     process.env.MINIAPP_SECRET_PATH ||
-      path.join(path.dirname(file), 'miniapp-secret.json'),
+      path.join(
+        fs.existsSync(file) ? path.dirname(file) : defaultStandaloneStateDir(),
+        'miniapp-secret.json',
+      ),
   );
   const credentialsPath = expandHome(
     process.env.MINIAPP_CREDENTIALS ||
@@ -337,12 +383,28 @@ export function loadConfig(): MiniappConfig {
   // this app's state lives.
   const mediaDir = expandHome(
     process.env.MINIAPP_MEDIA_DIR ||
-      String(raw.media_dir || path.join(path.dirname(file), 'media')),
+      String(
+        raw.media_dir ||
+          path.join(
+            fs.existsSync(file)
+              ? path.dirname(file)
+              : defaultStandaloneStateDir(),
+            'media',
+          ),
+      ),
   );
 
   const section = (raw.miniapp as Record<string, unknown>) || {};
+  /*
+   * State lives next to the config that describes it. With no config there
+   * is nothing to sit next to, so standalone gets its own directory rather
+   * than borrowing the Telegram bridge's -- a machine can run both.
+   */
   const stateDir = expandHome(
-    String(section.state_dir || path.dirname(file)),
+    String(
+      section.state_dir ||
+        (standalone ? defaultStandaloneStateDir() : path.dirname(file)),
+    ),
   );
   const port = Number(
     process.env.MINIAPP_PORT || section.port || 8790,
@@ -418,11 +480,17 @@ export function loadConfig(): MiniappConfig {
     deepLinkBase:
       String(process.env.MINIAPP_DEEPLINK || section.deep_link_base || '') ||
       null,
-    ownerName: String(section.owner_name || 'Parth'),
+    /*
+     * Empty rather than a name. The greeting omits it when unset, which is
+     * correct for a stranger's install; a default here greeted everyone as
+     * the original author.
+     */
+    ownerName: String(section.owner_name || ''),
   };
 
   return {
     botToken,
+    standalone,
     allowedUserId,
     /**
      * No fallback model id on purpose.

@@ -283,6 +283,18 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception ignored) {
                 return;
             }
+            /*
+             * http(s) only.
+             *
+             * This method is reachable from any script running in the
+             * pinned origin, and it launches trusted in-app chrome at
+             * whatever it is handed. Without this check an XSS on our own
+             * origin gets a navigation primitive it otherwise would not
+             * have: `file:`, `content:` and `javascript:` all parse fine
+             * as a Uri. A search result is always http(s), so nothing
+             * legitimate is lost.
+             */
+            if (!isWebUrl(uri)) return;
             runOnUiThread(() -> {
                 try {
                     final Intent intent = new Intent(MainActivity.this, BrowserActivity.class);
@@ -355,5 +367,16 @@ public class MainActivity extends BridgeActivity {
                 // the next inset pass will repeat this.
             }
         });
+    }
+
+    /** True only for a real absolute web URL. Used to gate in-app navigation. */
+    static boolean isWebUrl(Uri uri) {
+        if (uri == null) return false;
+        final String scheme = uri.getScheme();
+        if (scheme == null) return false;
+        final String lower = scheme.toLowerCase(java.util.Locale.ROOT);
+        if (!lower.equals("http") && !lower.equals("https")) return false;
+        final String host = uri.getHost();
+        return host != null && !host.isEmpty();
     }
 }
