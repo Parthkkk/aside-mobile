@@ -7,7 +7,7 @@
  * assertions in `openUrl.test` on the web side.
  */
 import { describe, expect, it } from 'vitest';
-import { asUrl, googleSearchUrl } from '../src/urlguess';
+import { asUrl, googleSearchUrl } from '../src/urlguess.js';
 
 describe('asUrl', () => {
   it('recognises a full https url', () => {

@@ -135,6 +135,10 @@ First run generates its own signing secret at
 repo. (A machine that also runs the Telegram bridge keeps using the
 bridge's own state directory instead, so the two do not collide.)
 
+With no bot token configured the server runs in standalone mode, and `/`
+redirects to `/app`. There is one address to remember and it is the bare
+hostname.
+
 ```bash
 curl -s http://127.0.0.1:8790/api/health              # {"ok":true}
 curl -sI "https://$ASIDE_TAILNET_HOST/app" | head -1  # HTTP/2 200
@@ -261,7 +265,7 @@ permissions are declared in
 whole list in a minute.
 
 **If you would rather have no warnings at all**, use the iPhone instructions
-below on an iPhone, or just open `https://<your-tailnet-host>/app` in Chrome
+below on an iPhone, or just open `https://<your-tailnet-host>/` in Chrome
 on Android and add it to your home screen. That gets you the same app as a
 web app with no APK involved. You lose the in-app GeckoView search and keep
 everything else.
@@ -303,13 +307,17 @@ free Apple ID. The web app avoids all of that and costs nothing.
 ### Install
 
 1. On the iPhone, open **Safari** and go to
-   `https://<your-tailnet-host>/app`. It has to be Safari. Chrome and
-   Firefox on iOS have no Add to Home Screen.
+   `https://<your-tailnet-host>/` (or `/app`, they are the same page). It
+   has to be Safari. Chrome and Firefox on iOS have no Add to Home Screen.
 2. **Share**, then **Add to Home Screen**, then **Add**.
 3. Open Aside from the home screen. Not from Safari.
-4. It asks to be paired. Copy the pairing link from
-   <http://127.0.0.1:8791/pair> on the Mac and paste it in. Universal
+4. It asks to be paired. On the Mac, open <http://127.0.0.1:8791/pair> and
+   press **Copy** next to the link, then paste it into the app. Universal
    Clipboard makes that a copy on one device and a paste on the other.
+
+Do **not** pair by scanning the QR on an iPhone. That pairs the Safari tab,
+and the app you install afterwards gets its own storage and will ask again.
+The pairing page spells both orders out.
 
 **Step 3 matters, and step 4 is the consequence.** iOS gives a Safari tab
 and an installed web app separate storage. Pairing in Safari then installing
@@ -346,14 +354,21 @@ miniapp/
 build-android.sh   Builds and publishes the APK
 ```
 
-Tailscale state (`tailscale/`, the tailscaled socket and logs) is created
-per-machine under `~/.aside-telegram-bridge/`. It is not part of this repo.
+Runtime state (the signing secret, media, an archived APK, and Tailscale's
+socket and logs if you run a userspace tailscaled) is created per-machine
+under `~/.aside-mobile/`. None of it is part of this repo.
 
 ```bash
 cd miniapp/web && npx vitest run      # 198 tests
-cd miniapp/server && npx vitest run   # 544 tests
+cd miniapp/server && npx vitest run   # 553 tests
+cd miniapp && npm run typecheck       # both workspaces
 cd miniapp && npm run doctor          # verifies a real install end to end
 ```
+
+GitHub Actions runs the tests, the typecheck and both builds on node 20 and
+22 for every push and pull request, plus two guards that caught real
+regressions before: no committed `/Users/...` paths, and no writes into the
+Telegram bridge's directory.
 
 ---
 

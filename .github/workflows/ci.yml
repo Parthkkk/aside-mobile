@@ -1,0 +1,85 @@
+# Runs the suite that until now only ran when somebody remembered to.
+#
+# Ubuntu rather than macOS: nothing under test is platform-specific, and the
+# macOS runners are ten times the minutes for the same result. The Android
+# assemble is not here on purpose -- it needs a JDK, the SDK and about 4GB,
+# and it does not exercise any code this repo owns beyond a Gradle config.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the floor in package.json engines. 22 is what a fresh
+        # `brew install node` gives someone today, so both have to pass.
+        node: ['20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+
+      - name: Install
+        working-directory: miniapp
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: miniapp
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: miniapp
+        run: npm test
+
+      - name: Build
+        working-directory: miniapp
+        run: npm run build
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build script cannot run here, but a syntax error in it is a
+      # broken Android build for whoever clones next, and that is cheap to
+      # catch.
+      - name: Syntax-check build-android.sh
+        run: bash -n build-android.sh
+
+      # Both of these were real regressions: a hardcoded /Users/parth path
+      # meant the repo only built on one Mac, and a hardcoded
+      # ~/.aside-telegram-bridge path created a bridge directory on machines
+      # that had never run the bridge.
+      #
+      # `git ls-files` rather than `grep -r`, so Gradle intermediates and
+      # node_modules cannot fail the job with paths nobody committed.
+      - name: No machine-specific paths
+        run: |
+          if git ls-files -z | xargs -0 grep -lI "/Users/parth" ; then
+            echo "::error::hardcoded /Users/parth path"
+            exit 1
+          fi
+
+      # Reading the bridge's tailscaled socket and its secret file is fine:
+      # a machine running both should find them. Creating directories or
+      # copying files in there is what put a `.aside-telegram-bridge/` on
+      # machines that had never run the bridge.
+      - name: build-android.sh does not write to the Telegram bridge
+        run: |
+          if grep -nE '^[[:space:]]*(mkdir|cp|mv|touch|rm)[^#]*aside-telegram-bridge' \
+               build-android.sh ; then
+            echo "::error::build-android.sh writes into ~/.aside-telegram-bridge"
+            exit 1
+          fi

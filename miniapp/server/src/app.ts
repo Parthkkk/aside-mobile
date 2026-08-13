@@ -2210,7 +2210,12 @@ export async function buildServer(
 
   // --- SPA hosting -------------------------------------------------------
   if (opts.webDist && fs.existsSync(opts.webDist)) {
-    await app.register(fastifyStatic, { root: opts.webDist });
+    /*
+     * `index: false` because `/` is handled explicitly below. Left on, the
+     * static plugin answers `/` with the raw `index.html` and there is no
+     * way to register a route that gets there first.
+     */
+    await app.register(fastifyStatic, { root: opts.webDist, index: false });
 
     /**
      * Standalone entry for the installed app.
@@ -2228,7 +2233,7 @@ export async function buildServer(
     let standaloneHtml: string | null = null;
     let standaloneMtime = 0;
 
-    app.get('/app', async (_request, reply) => {
+    function renderStandalone(): string {
       const mtime = fs.statSync(indexPath).mtimeMs;
       if (!standaloneHtml || mtime !== standaloneMtime) {
         standaloneMtime = mtime;
@@ -2271,7 +2276,32 @@ export async function buildServer(
             ].join('\n'),
           );
       }
-      return reply.type('text/html; charset=utf-8').send(standaloneHtml);
+      return standaloneHtml;
+    }
+
+    app.get('/app', async (_request, reply) => {
+      return reply.type('text/html; charset=utf-8').send(renderStandalone());
+    });
+
+    /**
+     * The bare origin.
+     *
+     * A standalone install has exactly one front door and it is `/app`.
+     * Serving the unmodified `index.html` here, which is what the static
+     * plugin did, hands a phone the Telegram build: it pulls a script from
+     * telegram.org and, more to the point, carries no `manifest.webmanifest`
+     * link, so iOS Add to Home Screen produces a plain bookmark instead of
+     * an installed web app. That in turn costs push and the storage
+     * exemption, which is most of the reason to install it at all.
+     *
+     * Typing the tailnet hostname with no path is the obvious thing to do,
+     * so redirect rather than document a path nobody will read. 302 and not
+     * 301: configuring a bot token later makes `/` meaningful again, and a
+     * permanent redirect would already be cached on every phone.
+     */
+    app.get('/', async (_request, reply) => {
+      if (config.standalone) return reply.redirect('/app', 302);
+      return reply.sendFile('index.html');
     });
 
     /**
@@ -2294,9 +2324,17 @@ export async function buildServer(
       );
     });
 
+    /*
+     * SPA fallback. Same reasoning as `/`: in standalone mode every deep
+     * link has to land on the standalone shell, or a stale icon, a shared
+     * link or a service-worker miss drops the phone onto the Telegram build.
+     */
     app.setNotFoundHandler((request, reply) => {
       if (request.url.startsWith('/api') || request.url.startsWith('/ws')) {
         return reply.code(404).send({ error: 'not_found' });
+      }
+      if (config.standalone) {
+        return reply.type('text/html; charset=utf-8').send(renderStandalone());
       }
       return reply.sendFile('index.html');
     });

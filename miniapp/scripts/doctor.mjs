@@ -51,6 +51,29 @@ async function httpStatus(url, timeoutMs = 4000) {
   }
 }
 
+/**
+ * Status plus body, without following redirects.
+ *
+ * `fetch` follows a 302 by default, which would hide exactly the thing the
+ * `/` check is looking for.
+ */
+async function httpRaw(url, timeoutMs = 4000) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ac.signal, redirect: 'manual' });
+    return {
+      status: res.status,
+      location: res.headers.get('location') || '',
+      body: await res.text().catch(() => ''),
+    };
+  } catch {
+    return { status: 0, location: '', body: '' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // --- 1. toolchain ---------------------------------------------------------
 section('Toolchain');
 
@@ -110,14 +133,48 @@ const health = await httpStatus(`http://127.0.0.1:${port}/api/health`);
 if (health === 200) {
   ok(`server responding on ${port}`);
 
-  const pair = await httpStatus(`http://127.0.0.1:${pairPort}/pair`);
-  if (pair === 200) ok(`pairing page on ${pairPort}`);
+  const pair = await httpRaw(`http://127.0.0.1:${pairPort}/pair`);
+  if (pair.status === 200) ok(`pairing page on ${pairPort}`);
   else bad(`pairing page not answering on ${pairPort}`, 'restart the server; check nothing else holds that port');
 
   const leak = await httpStatus(`http://127.0.0.1:${port}/pair`);
   if (leak === 403) ok('pairing page refused on the proxied port, as it must be');
   else if (leak === 404) warn('no /pair route on the app port', 'expected when the web app is not built');
   else bad(`/pair on the app port returned ${leak}, expected 403`, 'this is the tailnet pairing leak; do not expose this server');
+
+  /*
+   * iPhone cannot pair by scanning: an installed web app has storage
+   * separate from the Safari tab it was installed from, so it has to be
+   * installed first and then handed the link by paste. A pairing page that
+   * renders only a QR has nothing to paste, which is where the documented
+   * iPhone install used to dead-end.
+   */
+  if (pair.status === 200) {
+    if (pair.body.includes('#pair=') && pair.body.includes('<input')) {
+      ok('pairing link is copyable, which iPhone needs');
+    } else {
+      bad('pairing page has no copyable link', 'running an old build; rebuild and restart');
+    }
+  }
+
+  /*
+   * `/` used to serve the Telegram build: a script from telegram.org and no
+   * manifest link, so iOS Add to Home Screen made a bookmark rather than an
+   * installed app. This is also the cheapest way to notice that the running
+   * server is an older build than the checkout.
+   */
+  if (config?.standalone) {
+    const root = await httpRaw(`http://127.0.0.1:${port}/`);
+    if (root.status === 302 && root.location === '/app') {
+      ok('/ redirects to the standalone app');
+    } else if (root.body.includes('telegram.org/js')) {
+      bad('/ serves the Telegram build', 'running an old build; rebuild and restart the server');
+    } else if (root.status === 0) {
+      warn('could not read /', 'server answered health but not the root');
+    } else {
+      warn(`/ returned ${root.status}`, 'expected a 302 to /app in standalone mode');
+    }
+  }
 } else {
   warn(`server is not running on ${port}`, 'start it: cd miniapp/server && npm start');
 }

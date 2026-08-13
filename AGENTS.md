@@ -58,8 +58,9 @@ npm run setup
 and then runs the doctor described below.
 
 **Check:** the doctor's Toolchain, Build and Configuration sections are all
-`ok`. Tailscale warnings at this point are expected; you have not done that
-step yet.
+`ok`. Ignore the Runtime and Tailscale lines for now: the server is not
+running and Tailscale is not set up, so failures there are expected at this
+point and step 5 is where they have to be clean.
 
 If `npm install` dies inside `esbuild`'s postinstall with a SIGKILL, macOS
 has quarantined the downloaded binary. Re-running `npm install` hits the
@@ -160,15 +161,20 @@ On the Mac:
 open http://127.0.0.1:8791/pair
 ```
 
-Port 8791, not 8790. Ask the person to scan the QR with their phone. That is
-the only step that needs the device in hand.
+Port 8791, not 8790. The page carries the QR, the same link as copyable
+text, and the steps for both platforms. This is the only step that needs the
+device in hand.
 
-- **Android:** the QR opens the app and pairs in one step. In Chrome, menu >
-  Add to Home screen, then launch from the icon.
-- **iPhone:** Safari only. Share > Add to Home Screen > Add, open it from the
-  home screen, then paste the pairing link into the prompt. Pairing inside a
-  Safari tab and then installing does not carry over; iOS gives the installed
-  app separate storage.
+The order is different per platform and getting it wrong is the usual
+failure, so read this before handing over the phone:
+
+- **Android:** scan the QR. It opens the app and pairs in one step. Then in
+  Chrome, menu > Add to Home screen, and launch from the icon after that.
+- **iPhone:** do not scan. Open `https://$ASIDE_TAILNET_HOST/` in **Safari**,
+  Share > Add to Home Screen > Add, open it from the home screen, and only
+  then paste the link (the **Copy** button on the pairing page) into the
+  prompt. iOS gives an installed web app storage separate from the Safari
+  tab it came from, so pairing first and installing second loses the pairing.
 
 **Check:** the app opens the session list and a message you send gets a reply.
 
@@ -202,6 +208,8 @@ one. If the tailnet has other people on it, do not publish the APK there.
 | --- | --- | --- |
 | `cannot read miniapp config` | old build | rebuild; a missing config is normal now |
 | `/pair` returns 200 on 8790 | running an old build | rebuild and restart the server |
+| `/` serves a Telegram script tag | running an old build | rebuild and restart the server |
+| Pairing page shows a QR and no link | running an old build | rebuild and restart the server |
 | Phone says "can't reach your Mac" | Mac asleep, or server stopped | wake it, `npm start`, consider `npm run launchd` |
 | iPhone asks to pair every launch | running in a Safari tab | install to the home screen first |
 | `npm install` killed in esbuild | macOS quarantine | `xattr -dr com.apple.quarantine node_modules` |

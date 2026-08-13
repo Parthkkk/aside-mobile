@@ -97,6 +97,59 @@ describe('the pairing listener', () => {
     await pairApp.close();
   });
 
+  /*
+   * The page used to render the QR and nothing else, while the README told
+   * iPhone owners to "copy the pairing link from the pairing page". There
+   * was no link to copy: it existed only as pixels inside a PNG. iOS is the
+   * platform that cannot pair by scanning, because an installed web app has
+   * storage separate from the Safari tab it was installed from, so paste is
+   * the only route it has. That made the documented iPhone install
+   * impossible to finish.
+   */
+  it('renders the pairing link as selectable text, not only as a QR', async () => {
+    const pairApp = buildPairServer({ jwtSecret: secret, appPort: 8790 });
+    await pairApp.ready();
+    const res = await pairApp.inject({
+      method: 'GET',
+      url: '/pair',
+      remoteAddress: '127.0.0.1',
+    });
+    const link = `http://127.0.0.1:8790/app#pair=${derivePairingKey(secret)}`;
+    expect(res.body).toContain(`value="${link}"`);
+    await pairApp.close();
+  });
+
+  it('tells iPhone owners to install before pairing, and Android after', async () => {
+    const pairApp = buildPairServer({ jwtSecret: secret, appPort: 8790 });
+    await pairApp.ready();
+    const res = await pairApp.inject({
+      method: 'GET',
+      url: '/pair',
+      remoteAddress: '127.0.0.1',
+    });
+    expect(res.body).toContain('<h2>iPhone</h2>');
+    expect(res.body).toContain('<h2>Android</h2>');
+    // The ordering rule is the whole point of the iPhone section.
+    expect(res.body).toMatch(/Add to Home Screen/i);
+    expect(res.body).toMatch(/not<\/b> scan the code yet/i);
+    await pairApp.close();
+  });
+
+  it('keeps the link out of the 403 body, where the QR was already absent', async () => {
+    const pairApp = buildPairServer({ jwtSecret: secret, appPort: 8790 });
+    await pairApp.ready();
+    const res = await pairApp.inject({
+      method: 'GET',
+      url: '/pair',
+      remoteAddress: '100.96.251.107',
+    });
+    expect(res.statusCode).toBe(403);
+    // Adding the link as text created a second way to leak it.
+    expect(res.body).not.toContain('#pair=');
+    expect(res.body).not.toContain(derivePairingKey(secret));
+    await pairApp.close();
+  });
+
   it('derives the same key the app checks submissions against', () => {
     // build-android.sh derives this a third time, in python. If this
     // constant changes, that copy has to change with it.

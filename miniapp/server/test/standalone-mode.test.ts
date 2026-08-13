@@ -129,6 +129,99 @@ describe('a clone with no config file', () => {
   });
 });
 
+/*
+ * The bare origin, and every deep link, in standalone mode.
+ *
+ * `@fastify/static` served `index.html` at `/` and the SPA fallback sent
+ * the same file for anything unmatched. That file is the Telegram build:
+ * it pulls a script from telegram.org, and it carries no manifest link, so
+ * iOS Add to Home Screen from `/` produces a bookmark rather than an
+ * installed web app -- which costs push and the seven-day storage
+ * exemption, most of the reason to install it. Typing the tailnet hostname
+ * with no path is the obvious thing to do, so `/` cannot be the broken one.
+ */
+const TELEGRAM_TAG =
+  '<script src="https://telegram.org/js/telegram-web-app.js"></script>';
+
+async function bootWithWeb(): Promise<string> {
+  const dist = path.join(tmp, 'dist');
+  fs.mkdirSync(dist, { recursive: true });
+  fs.writeFileSync(
+    path.join(dist, 'index.html'),
+    `<!doctype html><html><head>${TELEGRAM_TAG}</head><body></body></html>`,
+  );
+  const config = loadConfig();
+  secret = loadOrCreateJwtSecret(config.secretPath);
+  ({ app } = await buildServer(config, { jwtSecret: secret, webDist: dist }));
+  await app.ready();
+  return dist;
+}
+
+describe('the front door of a standalone install', () => {
+  it('redirects / to the standalone entry', async () => {
+    await bootWithWeb();
+    const res = await app.inject({ method: 'GET', url: '/' });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe('/app');
+  });
+
+  it('never serves the Telegram bridge script from / ', async () => {
+    await bootWithWeb();
+    const res = await app.inject({ method: 'GET', url: '/app' });
+    expect(res.body).not.toContain('telegram.org/js');
+  });
+
+  it('puts the manifest link on the page iOS actually installs', async () => {
+    await bootWithWeb();
+    const res = await app.inject({ method: 'GET', url: '/app' });
+    expect(res.body).toContain('manifest.webmanifest');
+    expect(res.body).toContain('apple-mobile-web-app-capable');
+  });
+
+  it('sends deep links to the standalone shell, not the Telegram build', async () => {
+    await bootWithWeb();
+    const res = await app.inject({ method: 'GET', url: '/settings' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain('telegram.org/js');
+    expect(res.body).toContain('manifest.webmanifest');
+  });
+
+  it('still 404s the API rather than answering it with HTML', async () => {
+    await bootWithWeb();
+    const res = await app.inject({ method: 'GET', url: '/api/nope' });
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'not_found' });
+  });
+});
+
+describe('the same door with Telegram configured', () => {
+  it('serves the Telegram build at / instead of redirecting', async () => {
+    // Telegram Web loads the mini app at the origin root and needs the
+    // bridge script, so the redirect has to be conditional on the mode
+    // rather than unconditional.
+    const file = path.join(tmp, 'tg-config.json');
+    fs.writeFileSync(file, JSON.stringify({ token: '123:abc', chat_id: 42 }));
+    process.env.MINIAPP_CONFIG = file;
+
+    const dist = path.join(tmp, 'dist-tg');
+    fs.mkdirSync(dist, { recursive: true });
+    fs.writeFileSync(
+      path.join(dist, 'index.html'),
+      `<!doctype html><html><head>${TELEGRAM_TAG}</head><body></body></html>`,
+    );
+
+    const config = loadConfig();
+    expect(config.standalone).toBe(false);
+    secret = loadOrCreateJwtSecret(config.secretPath);
+    ({ app } = await buildServer(config, { jwtSecret: secret, webDist: dist }));
+    await app.ready();
+
+    const res = await app.inject({ method: 'GET', url: '/' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('telegram.org/js');
+  });
+});
+
 describe('a config with a token but no chat id', () => {
   it('still fails loudly, because that one is a real mistake', () => {
     const file = path.join(tmp, 'half-config.json');

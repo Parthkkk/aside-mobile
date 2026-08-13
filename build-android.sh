@@ -6,15 +6,19 @@
 # written into the repo. Asking Tailscale is more reliable than asking the
 # user to remember it, and it is the same value the server publishes on.
 #
-# The socket path is the bridge's own tailscaled, not the system one, so a
-# machine running both keeps them separate.
+# Some installs run a userspace tailscaled of their own rather than the
+# system one. Those are checked first, then the system daemon.
 if [ -z "${ASIDE_TAILNET_HOST:-}" ]; then
-  TS_SOCK="$HOME/.aside-telegram-bridge/tailscale/ts.sock"
   TS_BIN="$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)"
-  if [ -S "$TS_SOCK" ]; then
+  for TS_SOCK in \
+    "$HOME/.aside-mobile/tailscale/ts.sock" \
+    "$HOME/.aside-telegram-bridge/tailscale/ts.sock"
+  do
+    [ -S "$TS_SOCK" ] || continue
     ASIDE_TAILNET_HOST="$("$TS_BIN" --socket "$TS_SOCK" status --json 2>/dev/null \
       | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)"
-  fi
+    [ -n "${ASIDE_TAILNET_HOST:-}" ] && break
+  done
   if [ -z "${ASIDE_TAILNET_HOST:-}" ]; then
     ASIDE_TAILNET_HOST="$("$TS_BIN" status --json 2>/dev/null \
       | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)"
@@ -220,7 +224,14 @@ echo "  (or AirDrop/copy the file and tap it on the phone)"
 # Publish the new build so the phone can install it over the tailnet
 # instead of needing a cable. `npm run build` empties dist, so this has to
 # run after the assemble step rather than before it.
-mkdir -p "$HOME/.aside-telegram-bridge/apk"
+#
+# The archive copy goes next to the signing secret, whichever state dir
+# that turned out to be. Hardcoding the Telegram bridge's directory here
+# created a `~/.aside-telegram-bridge/` on machines that had never run the
+# bridge and never would.
+STATE_DIR="$(dirname "$SECRET_FILE")"
+mkdir -p "$STATE_DIR/apk"
 cp "$OUT" "$WEB/dist/Aside-mobile.apk"
-cp "$OUT" "$HOME/.aside-telegram-bridge/apk/Aside-mobile.apk"
+cp "$OUT" "$STATE_DIR/apk/Aside-mobile.apk"
 echo "published: https://$ASIDE_TAILNET_HOST/Aside-mobile.apk"
+echo "archived:  $STATE_DIR/apk/Aside-mobile.apk"

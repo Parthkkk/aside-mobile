@@ -45,6 +45,24 @@ function isLoopbackIp(ip: string): boolean {
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
+/**
+ * Escape for HTML text and double-quoted attributes.
+ *
+ * The pairing link is built from a hex key and a hostname read out of
+ * Tailscale, so in practice it has nothing to escape. It is interpolated
+ * into this page in four places, though, and one of those is a `value=`
+ * attribute. Escaping is cheaper than reasoning about whether a hostname
+ * can ever contain a quote.
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export interface PairServerOptions {
   jwtSecret: string;
   /** The MAIN app's port -- what the pairing link points the phone at. */
@@ -79,6 +97,22 @@ export function buildPairServer(opts: PairServerOptions): FastifyInstance {
       color: { dark: '#3d3a34', light: '#f6f3ee' },
     });
 
+    /*
+     * Both platforms get their own steps, because the correct order is
+     * different and getting it wrong is the most common way this fails.
+     *
+     * Android can scan and be done: Chrome pairs in the tab, and adding to
+     * the home screen afterwards keeps the same storage.
+     *
+     * iOS does not. An installed web app gets a storage container separate
+     * from the Safari tab it was installed from, so a phone that pairs by
+     * scanning and then installs ends up with an app that has never seen
+     * the key. Install first, then paste. That is why the link is on this
+     * page as selectable text and not only inside the QR -- the paste step
+     * has nothing to paste otherwise.
+     */
+    const safeLink = escapeHtml(link);
+
     return reply.type('text/html; charset=utf-8').send(`<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -86,30 +120,87 @@ export function buildPairServer(opts: PairServerOptions): FastifyInstance {
 <style>
   body{font:16px/1.55 -apple-system,system-ui,sans-serif;background:#f6f3ee;color:#3d3a34;
        margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}
-  .card{max-width:26rem;text-align:center}
+  .card{max-width:30rem;text-align:center}
   h1{font-family:ui-serif,'New York',Georgia,serif;font-weight:500;font-size:1.6rem;margin:0 0 .35rem}
   p{margin:.4rem 0;color:#6f6961}
-  img{display:block;margin:1.5rem auto;border-radius:14px;box-shadow:0 2px 20px rgba(0,0,0,.09)}
-  ol{text-align:left;color:#6f6961;padding-left:1.15rem;margin:1.25rem 0 0}
+  img{display:block;margin:1.25rem auto;border-radius:14px;box-shadow:0 2px 20px rgba(0,0,0,.09)}
+  ol{text-align:left;color:#6f6961;padding-left:1.15rem;margin:.5rem 0 0}
   li{margin:.4rem 0}
   code{background:#e9e4db;padding:.12em .4em;border-radius:5px;font-size:.9em}
+  h2{font-size:.78rem;letter-spacing:.09em;text-transform:uppercase;color:#8a8378;
+     margin:0 0 .1rem;text-align:left;font-weight:600}
+  .plat{border-top:1px solid #e2ddd4;padding-top:1rem;margin-top:1.4rem;text-align:left}
+  .linkrow{display:flex;gap:.5rem;margin:1.25rem 0 0}
+  .linkrow input{flex:1;min-width:0;font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+       background:#fffdf9;border:1px solid #e2ddd4;border-radius:9px;padding:.6rem .7rem;
+       color:#3d3a34}
+  .linkrow button{flex:none;font:600 13px/1 -apple-system,system-ui,sans-serif;cursor:pointer;
+       background:#3d3a34;color:#f6f3ee;border:0;border-radius:9px;padding:0 1rem}
+  .linkrow button:active{opacity:.75}
+  .hint{font-size:.8rem;color:#8a8378;margin:.45rem 0 0;text-align:left}
   .warn{margin-top:1.5rem;font-size:.85rem;color:#8a8378;border-top:1px solid #e2ddd4;padding-top:1rem}
 </style>
 <div class="card">
   <h1>Pair your phone</h1>
-  <p>Scan with the phone you want to use Aside on.</p>
+  <p>Tailscale has to be installed and signed in on the phone first.</p>
   <img src="${qr}" width="320" height="320" alt="Pairing QR code">
-  <ol>
-    <li>Make sure Tailscale is installed and signed in on the phone.</li>
-    <li>Scan the code. It opens Aside and pairs in one step.</li>
-    <li>In Chrome, tap the menu and choose <b>Add to Home screen</b>.</li>
-    <li>Launch it from the icon from now on.</li>
-  </ol>
+
+  <div class="linkrow">
+    <input id="link" value="${safeLink}" readonly spellcheck="false"
+           aria-label="Pairing link">
+    <button id="copy" type="button">Copy</button>
+  </div>
+  <p class="hint">Same link the QR holds. iPhone needs it as text.</p>
+
+  <div class="plat">
+    <h2>Android</h2>
+    <ol>
+      <li>Scan the code. It opens Aside and pairs in one step.</li>
+      <li>In Chrome, tap the menu and choose <b>Add to Home screen</b>.</li>
+      <li>Launch it from the icon from now on.</li>
+    </ol>
+  </div>
+
+  <div class="plat">
+    <h2>iPhone</h2>
+    <ol>
+      <li>Do <b>not</b> scan the code yet. Installing after pairing loses the pairing.</li>
+      <li>Open <b>Safari</b> on the phone and go to <code>${escapeHtml(base)}/app</code>.</li>
+      <li><b>Share</b>, then <b>Add to Home Screen</b>, then <b>Add</b>.</li>
+      <li>Open Aside from the home screen icon, not from Safari.</li>
+      <li>It asks to be paired. Copy the link above and paste it in.
+          Universal Clipboard copies here and pastes there.</li>
+    </ol>
+  </div>
+
   <p class="warn">This link is a key to your Mac. Anyone who has it and is on
   your tailnet can use your agent. It is the same key every time and it does
   not expire on its own: to revoke it, delete the signing secret and restart
   the server.</p>
-</div>`);
+</div>
+<script>
+  // Progressive enhancement only. The input is selectable and copyable by
+  // hand, so a failed clipboard write is a cosmetic problem, not a dead end.
+  (function () {
+    var btn = document.getElementById('copy');
+    var input = document.getElementById('link');
+    btn.addEventListener('click', function () {
+      input.select();
+      input.setSelectionRange(0, input.value.length);
+      var done = function () {
+        btn.textContent = 'Copied';
+        setTimeout(function () { btn.textContent = 'Copy'; }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(input.value).then(done, function () {
+          try { document.execCommand('copy'); done(); } catch (e) {}
+        });
+      } else {
+        try { document.execCommand('copy'); done(); } catch (e) {}
+      }
+    });
+  })();
+</script>`);
   });
 
   return app;

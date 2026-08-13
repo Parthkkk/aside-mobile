@@ -11,9 +11,9 @@ import {
   frecency,
   matchWeight,
   recencyBoost,
-} from '../src/omnibox';
-import type { HistoryEntry } from '../src/history';
-import type { Visit } from '../src/visits';
+} from '../src/omnibox.js';
+import type { HistoryEntry } from '../src/history.js';
+import type { Visit } from '../src/visits.js';
 
 const NOW = new Date('2026-08-12T12:00:00Z').getTime();
 
