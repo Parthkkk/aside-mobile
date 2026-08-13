@@ -150,7 +150,16 @@ curl -s http://127.0.0.1:8790/api/health              # {"ok":true}
 curl -sI "https://$ASIDE_TAILNET_HOST/app" | head -1  # HTTP/2 200
 ```
 
-If the second fails, Tailscale HTTPS is not on yet. Back to step 3.
+If the second fails, Tailscale HTTPS is not on yet. Back to step 3. The
+doctor (`npm run doctor`) performs this same HTTPS fetch itself, with
+certificate verification on, so it reports the exact gap without a manual
+`curl`.
+
+The server finds the Mac's tailnet hostname on its own — it probes Tailscale
+for it rather than trusting a hand-copied value — so the pairing page always
+shows the right link even if `ASIDE_TAILNET_HOST` was never exported. If you
+do export it (or any `MINIAPP_*` override), `npm run launchd` bakes it into
+the launchd job, which does not read `~/.zshrc`.
 
 ### Keeping it up
 

@@ -56,6 +56,22 @@ fs.mkdirSync(path.dirname(plistPath), { recursive: true });
 
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/*
+ * launchd does not read ~/.zshrc, so an override exported in a shell is lost
+ * the moment the job is bootstrapped. Forward the environment the installer
+ * was run under so an agent (or a person) that pins ASIDE_TAILNET_HOST or any
+ * MINIAPP_* setting gets the same value inside the job. `PATH` is always set
+ * explicitly below because the job has no login shell at all.
+ */
+const forwardedEnv = Object.keys(process.env)
+  .filter((k) => k.startsWith('MINIAPP_') || k.startsWith('ASIDE_'))
+  .sort()
+  .map(
+    (k) =>
+      `    <key>${esc(k)}</key><string>${esc(String(process.env[k]))}</string>`,
+  )
+  .join('\n');
+
 const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -74,6 +90,7 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+${forwardedEnv}
   </dict>
 </dict>
 </plist>

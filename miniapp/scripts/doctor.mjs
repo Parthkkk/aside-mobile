@@ -186,6 +186,26 @@ if (health === 200) {
       warn(`/ returned ${root.status}`, 'expected a 302 to /app in standalone mode');
     }
   }
+
+  /*
+   * "It works now" is not the same as "it will still work after a reboot".
+   * The launchd job is what keeps the server up across logouts and reboots;
+   * without it the first reboot silently stops the app until someone
+   * re-runs `npm start`.
+   */
+  const launchdPlist = path.join(
+    os.homedir(),
+    'Library/LaunchAgents',
+    'com.aside.mobile.plist',
+  );
+  if (fs.existsSync(launchdPlist)) {
+    ok('server installed as a launchd job (survives a reboot)');
+  } else {
+    warn(
+      'server is not installed as a launchd job',
+      'npm run launchd  (otherwise the app stops after a reboot until restarted by hand)',
+    );
+  }
 } else {
   warn(`server is not running on ${port}`, 'start it: cd miniapp/server && npm start');
 }
@@ -257,6 +277,33 @@ if (!tsCandidates.some((p) => fs.existsSync(p))) {
     }
   } catch {
     warn('could not read the tailscale serve config', `${ts} serve status`);
+  }
+
+  /*
+   * The phone reaches the Mac over https://<host>, not over loopback, so
+   * `serve status` alone can look right while HTTPS certificates are not
+   * yet enabled and the phone is stuck on a cert error. The only
+   * trustworthy test is to fetch the real URL with certificate verification
+   * ON -- the check that used to be a manual curl in the README. Skipped
+   * when the server is not running (a dead server is a different failure,
+   * already reported above).
+   */
+  if (health === 200 && tailnetHost) {
+    const appUrl = `https://${tailnetHost}/app`;
+    const appStatus = await httpStatus(appUrl, 8000);
+    if (appStatus === 200) {
+      ok(`phone can reach ${appUrl} over HTTPS`);
+    } else if (appStatus === 0) {
+      bad(
+        `could not reach ${appUrl} over HTTPS`,
+        `enable HTTPS Certificates in the Tailscale admin console (DNS > HTTPS Certificates), then run \`${ts} serve --bg ${port}\` and confirm \`curl -I ${appUrl}\` returns 200`,
+      );
+    } else {
+      bad(
+        `${appUrl} returned ${appStatus}, expected 200`,
+        `check \`${ts} serve status\` and the server log`,
+      );
+    }
   }
 }
 

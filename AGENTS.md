@@ -102,6 +102,14 @@ echo "$ASIDE_TAILNET_HOST"
 **Check:** the hostname looks like `their-mac.tailXXXX.ts.net`, and the phone
 appears in `$TS status`.
 
+The server does not depend on this export. It probes Tailscale for the same
+hostname on its own (the App Store bundle, a Homebrew binary, or a userspace
+daemon socket), so the pairing page shows the right link regardless of which
+Tailscale this machine has. Exporting `ASIDE_TAILNET_HOST` is a pin for the
+build script and a fallback for the server, not a requirement. If you set it
+or any `MINIAPP_*` override, `npm run launchd` (step 4) forwards it into the
+launchd job, which does not read `~/.zshrc`.
+
 Turn on HTTPS certificates in the Tailscale admin console under DNS >
 HTTPS Certificates. This is not optional: phone browsers reject self-signed
 certificates, and Web Push requires real HTTPS.
@@ -141,6 +149,10 @@ curl -sI "https://$ASIDE_TAILNET_HOST/app" | head -1     # HTTP/2 200
 ```
 
 If the second fails, Tailscale HTTPS is not on yet. Go back to step 3.
+
+The doctor (step 5) performs this same HTTPS fetch itself, with certificate
+verification on, so it will name the exact gap — no manual `curl` needed to
+be sure.
 
 ## 5. Verify the whole install
 
@@ -214,7 +226,7 @@ one. If the tailnet has other people on it, do not publish the APK there.
 | `/pair` returns 200 on 8790 | running an old build | rebuild and restart the server |
 | `/` serves a Telegram script tag | running an old build | rebuild and restart the server |
 | Pairing page shows a QR and no link | running an old build | rebuild and restart the server |
-| Phone says "can't reach your Mac" | Mac asleep, or server stopped | wake it, `npm start`, consider `npm run launchd` |
+| Phone says "can't reach your Mac" | Tailscale off on the phone, server stopped, or HTTPS certs missing | run `npm run doctor` on the Mac; it names the exact one |
 | iPhone asks to pair every launch | running in a Safari tab | install to the home screen first |
 | `npm install` killed in esbuild | macOS quarantine | `xattr -dr com.apple.quarantine node_modules` |
 | History and search return nothing, no error | Node older than 22.5 | `brew install node`, then rebuild and restart |
