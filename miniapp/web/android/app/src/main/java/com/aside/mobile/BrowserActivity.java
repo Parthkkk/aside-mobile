@@ -1,4 +1,4 @@
-package com.parth.aside;
+package com.aside.mobile;
 
 import android.content.Intent;
 import android.os.Bundle;
@@ -50,7 +50,7 @@ import org.mozilla.geckoview.GeckoView;
 public class BrowserActivity extends AppCompatActivity {
 
     /** URL to open. */
-    public static final String EXTRA_URL = "com.parth.aside.extra.URL";
+    public static final String EXTRA_URL = "com.aside.mobile.extra.URL";
 
     /**
      * One engine for the whole process.

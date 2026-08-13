@@ -50,7 +50,9 @@ if (!tailnetHost) {
 }
 
 const config: CapacitorConfig = {
-  appId: 'com.parth.aside',
+  // Neutral identity: every person who builds this owns their own copy of
+  // the app, so the id is the product, not the author.
+  appId: 'com.aside.mobile',
   appName: 'Aside',
   // Required to exist even when `server.url` wins at runtime. It is also
   // the payload a future offline shell would fall back to.

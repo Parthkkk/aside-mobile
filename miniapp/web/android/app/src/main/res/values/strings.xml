@@ -2,6 +2,6 @@
 <resources>
     <string name="app_name">Aside</string>
     <string name="title_activity_main">Aside</string>
-    <string name="package_name">com.parth.aside</string>
-    <string name="custom_url_scheme">com.parth.aside</string>
+    <string name="package_name">com.aside.mobile</string>
+    <string name="custom_url_scheme">com.aside.mobile</string>
 </resources>

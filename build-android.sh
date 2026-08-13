@@ -122,7 +122,8 @@ echo "==> baking the pairing key into the shell"
 # The key is derived from the JWT secret, so this adds no new secret. It
 # does mean the APK contains a credential, which is acceptable precisely
 # because the server is tailnet-only: holding this file is useless without
-# also being on Parth's tailnet. Do not post the APK anywhere public.
+# also being on the owner's own tailnet. Do not post the APK anywhere
+# public.
 #
 #
 # The secret has two possible homes and the server decides which, so this

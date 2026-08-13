@@ -1,4 +1,4 @@
-package com.parth.aside;
+package com.aside.mobile;
 
 import android.Manifest;
 import android.content.ComponentName;
