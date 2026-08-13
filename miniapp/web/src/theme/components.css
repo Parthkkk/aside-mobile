@@ -209,33 +209,60 @@
 /* --- suggestions, docked above the composer ------------------------------ */
 
 /*
- * The list used to fill a whole second screen under its own address bar.
- * Above the composer it has to be bounded instead, or a long suggestion set
- * pushes the field it belongs to off the top of the screen. Capped at a bit
- * under half the viewport so the thread stays visible behind it, which is
- * what keeps this feeling like a mode rather than a new page.
+ * Not a card.
+ *
+ * This renders INSIDE the composer, which is already a white surface with
+ * its own three-layer shadow, so giving the list a fill and a shadow of its
+ * own made a card inside a card: two edges, two lifts, and two subtly
+ * different whites -- because the colour it used, `--card`, is not a token
+ * that exists in this project and fell through to a hardcoded warm
+ * off-white. Two whites three percent apart is the specific look of a
+ * palette assembled rather than chosen, and it is why this read as bolted
+ * on.
+ *
+ * It is a section of the composer instead. No fill, no shadow, no radius.
+ * One hairline separates it from the input, which is the only line the eye
+ * needs to see that the list belongs to the box below it.
  */
 .omni-sheet-inline {
   flex: none;
-  max-height: min(44vh, 380px);
-  margin: 0 -14px 8px;
-  border-radius: 14px;
-  background: var(--card, oklch(99.4% 0.002 92));
-  box-shadow: 0 6px 24px oklch(0% 0 0 / 0.08);
+  /* Bleed through the composer's 12px inline padding so rows run edge to
+     edge, the way a list inside a sheet should. */
+  margin-inline: -12px;
+  margin-bottom: 2px;
+  padding-bottom: 6px;
+  border-bottom: var(--hairline) solid var(--border-surface);
+  max-height: min(42vh, 360px);
   overflow-y: auto;
   overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
+.omni-sheet-inline::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * 16px, matching the textarea's own inset (the composer's 12px plus the
+ * input's 4px). Suggestion text and typed text share a left edge, which is
+ * what makes the list read as a continuation of the field rather than a
+ * separate panel that happens to be nearby.
+ */
 .omni-sheet-inline .omni-row {
-  padding-left: 14px;
-  padding-right: 14px;
+  padding: 9px 16px;
+  border-radius: var(--radius-lg);
 }
 
-/* The empty state was sized for a full screen; docked it just needs a line. */
+.omni-sheet-inline .omni-row:active {
+  background: var(--muted);
+}
+
 .omni-sheet-inline .omni-empty {
-  padding: 16px 14px;
+  padding: 10px 16px 14px;
   margin: 0;
-  text-align: center;
+  color: var(--surface-tertiary-foreground);
+  font-size: var(--text-sm);
+  text-align: left;
 }
 
 /* --- buttons and pills --------------------------------------------------- */
@@ -4336,17 +4363,6 @@
    Browser: the search panel, rebuilt as a real browser.
    ===================================================================== */
 
-.omni-sheet {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  background: var(--page, oklch(97.3% 0.004 92));
-  -webkit-overflow-scrolling: touch;
-}
-
-.omni-sheet::-webkit-scrollbar { display: none; }
-
 .omni-list {
   padding: 4px 0;
 }
@@ -4623,15 +4639,27 @@
  * left, so the waiting badge appearing cannot shunt it sideways. A control
  * that moves when an unrelated element shows up reads as a bug.
  */
+/*
+ * Built on the app's own segmented control rather than a second one.
+ *
+ * The first version invented its own colours -- `--card`, `--sunk`,
+ * `--text-dim` -- none of which are tokens in this project, so each fell
+ * through to a hardcoded warm off-white that did not match the pure white
+ * the composer and cards actually use.
+ *
+ * `.segmented` already exists for the List/Card tabs. This matches it
+ * exactly, so there is one segmented control in this app rather than two
+ * that nearly agree.
+ */
 .mode-switch {
   position: absolute;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  display: flex;
-  padding: 2px;
-  border-radius: var(--radius-full, 999px);
-  background: var(--sunk, oklch(93.5% 0.006 92));
+  display: inline-flex;
+  padding: 3px;
+  border-radius: var(--radius-full);
+  background: var(--muted);
   /* Its own stacking context: the sliding indicator is positioned, and
      without this it can be painted over by a neighbour's active state. */
   isolation: isolate;
@@ -4645,18 +4673,19 @@
   cursor: pointer;
   /* Both halves the same width, or the indicator's 100% translate lands
      somewhere other than on top of the second label. */
-  width: 58px;
-  padding: 6px 0;
-  border-radius: var(--radius-full, 999px);
+  width: 56px;
+  height: 30px;
+  border-radius: var(--radius-full);
   background: transparent;
-  color: var(--text-dim, oklch(55% 0.012 92));
-  font: 600 12.5px/1 -apple-system, system-ui, sans-serif;
-  transition: color 0.18s ease;
+  color: var(--secondary-foreground);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-medium);
+  transition: color var(--duration) var(--ease-out);
   -webkit-tap-highlight-color: transparent;
 }
 
 .mode-switch-option.is-on {
-  color: var(--text, oklch(32% 0.014 92));
+  color: var(--foreground);
 }
 
 /*
@@ -4670,15 +4699,17 @@
 .mode-switch-indicator {
   position: absolute;
   z-index: 0;
-  top: 2px;
-  left: 2px;
-  width: 58px;
-  height: calc(100% - 4px);
-  border-radius: var(--radius-full, 999px);
-  background: var(--card, oklch(99.4% 0.002 92));
-  box-shadow: 0 1px 2px oklch(0% 0 0 / 0.10);
-  /* Slight overshoot: the same easing the sheets use, so this feels like
-     part of the app rather than a component borrowed from elsewhere. */
+  top: 3px;
+  left: 3px;
+  width: 56px;
+  height: 30px;
+  border-radius: var(--radius-full);
+  /* Same fill and shadow as `.segmented button.is-active`, so the two
+     controls are visibly the same component. */
+  background: var(--surface-primary);
+  box-shadow: 0 1px 2px oklch(14.5% 0 0 / 0.06);
+  /* The easing the sheets use, so this belongs to the app rather than
+     looking like a component borrowed from elsewhere. */
   transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
   will-change: transform;
 }

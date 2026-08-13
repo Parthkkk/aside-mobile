@@ -110,7 +110,7 @@ export function OmniboxResults({
 }) {
   if (items.length === 0) {
     return (
-      <div className="omni-sheet omni-sheet-inline">
+      <div className="omni-sheet-inline">
         <p className="omni-empty">
           {query ? 'No suggestions' : 'Recent pages from your Mac show up here'}
         </p>
@@ -119,7 +119,7 @@ export function OmniboxResults({
   }
 
   return (
-    <div className="omni-sheet omni-sheet-inline">
+    <div className="omni-sheet-inline">
       <div className="omni-list">
         {items.map((item, i) => (
           <OmniRow

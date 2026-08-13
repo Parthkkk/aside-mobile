@@ -18,8 +18,6 @@
  * cache is dropped on activate.
  */
 /*
- * Bump this on any change that must not be served from an old cache.
- *
  * v2: the search rewrite. v1 shipped a stylesheet with an unclosed rule
  * that silently voided every rule after it, and because `/assets/*` is
  * cache-first and never revalidated, a phone that fetched it once kept
@@ -29,7 +27,25 @@
  * moment the Mac is briefly unreachable. Deleting every non-matching
  * cache on activate is the only reliable way out of that state.
  */
-const VERSION = 'aside-v3';
+/*
+ * Stamped at build time by the `sw-build-id` plugin in vite.config.ts, from
+ * a hash of the emitted asset filenames. It was a hand-written string with
+ * a comment telling the next person to remember to bump it, which is the
+ * kind of instruction that gets forgotten exactly once and then costs a
+ * phone that renders unstyled until someone reinstalls the app.
+ *
+ * The failure it prevents, reproduced before this changed: a cached shell
+ * outlives the assets it points at. `npm run build` empties dist and emits
+ * new content hashes, so the old `/assets/index-<hash>.css` is gone from
+ * the server. The shell in the cache still asks for it, the asset handler
+ * misses, the fetch 404s, and the app paints with no stylesheet. Nothing
+ * recovers from that on its own, because both caches are behaving exactly
+ * as designed.
+ *
+ * Tying the version to the build means every deploy invalidates the shell,
+ * so the shell and the assets can never disagree about which build it is.
+ */
+const VERSION = 'aside-__BUILD_ID__';
 
 /**
  * How long a cold start waits for the Mac before painting from cache.
