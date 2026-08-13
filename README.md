@@ -74,9 +74,17 @@ Installs both workspaces, builds the server and the web app, then runs the
 doctor. A couple of minutes.
 
 No configuration file is needed. A fresh clone runs in standalone mode: no
-Telegram, no bot token, pairing from the loopback page. If `npm install`
-dies inside `esbuild` with a SIGKILL, macOS quarantined the download; run
-`xattr -dr com.apple.quarantine node_modules && npm rebuild esbuild`.
+Telegram, no bot token, pairing from the loopback page.
+
+If `npm install` dies inside `esbuild` with a SIGKILL, macOS quarantined the
+download, and re-running hits the same wall. Do this instead:
+
+```bash
+rm -rf node_modules
+npm install --ignore-scripts
+xattr -dr com.apple.quarantine node_modules
+npm rebuild
+```
 
 ## 3. Tailscale
 

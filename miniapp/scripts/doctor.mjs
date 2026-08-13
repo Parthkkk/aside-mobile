@@ -158,8 +158,11 @@ if (!ts) {
 // --- 6. Android build, only if someone wants it ---------------------------
 section('Android build (optional)');
 
+const tarballJdk = path.join(os.homedir(), 'java/jdk-21.0.12+8/Contents/Home');
 const javaHome = process.env.JAVA_HOME
-  || (() => { try { return sh('/usr/libexec/java_home', ['-v', '21']); } catch { return ''; } })();
+  || (() => { try { return sh('/usr/libexec/java_home', ['-v', '21']); } catch { return ''; } })()
+  // build-android.sh falls back to an unpacked tarball; look where it looks.
+  || (fs.existsSync(tarballJdk) ? tarballJdk : '');
 if (javaHome) ok('JDK 21', javaHome);
 else warn('no JDK 21', 'only needed to build the APK: brew install --cask temurin@21');
 

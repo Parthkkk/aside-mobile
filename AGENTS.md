@@ -62,11 +62,15 @@ and then runs the doctor described below.
 step yet.
 
 If `npm install` dies inside `esbuild`'s postinstall with a SIGKILL, macOS
-has quarantined the downloaded binary. Fix it and re-run:
+has quarantined the downloaded binary. Re-running `npm install` hits the
+same wall, because it re-fetches and macOS re-quarantines. Install without
+scripts first, clear the flag, then let the scripts run:
 
 ```bash
+rm -rf node_modules
+npm install --ignore-scripts
 xattr -dr com.apple.quarantine node_modules
-npm rebuild esbuild
+npm rebuild
 ```
 
 ## 3. Tailscale
