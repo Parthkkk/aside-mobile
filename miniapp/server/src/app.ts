@@ -34,7 +34,7 @@ import {
 } from './catalog.js';
 import { readDesktopState } from './desktop.js';
 import { TranscribeError, transcribeAudio } from './transcribe.js';
-import QRCode from 'qrcode';
+import { derivePairingKey } from './pair.js';
 import { StateDb, isFullAccess, isSuspended } from './statedb.js';
 import { SettingsStore, defaultSettingsPath, resolveNewSessionModel } from './settings.js';
 import { stripAgentDirectives, withPreamble, withReminder } from './preamble.js';
@@ -229,6 +229,11 @@ export interface BuildOptions {
   publicUrl?: () => string | null;
   /** Shown on the settings screen, so the owner can tell builds apart. */
   version?: string;
+  /**
+   * Where the loopback-only pairing listener lives, for the pointer this
+   * app serves at `/pair`. Defaults to one above the app's own port.
+   */
+  pairPort?: number;
   /**
    * Stable tailnet hostname for this Mac, read lazily.
    *
@@ -667,12 +672,11 @@ export async function buildServer(
    * adds no new secret to store, rotate, or leak. Compared in constant time.
    * This route is reachable only over the private tailnet, so the network
    * is a second gate behind this one.
+   *
+   * The derivation lives in `pair.ts` because the loopback-only pairing
+   * listener needs the same value from the same input.
    */
-  const pairingKey = crypto
-    .createHash('sha256')
-    .update(`${opts.jwtSecret}:standalone-pairing:v1`)
-    .digest('hex')
-    .slice(0, 32);
+  const pairingKey = derivePairingKey(opts.jwtSecret);
 
   app.post(
     '/api/pair',
@@ -2184,70 +2188,23 @@ export async function buildServer(
     });
 
     /**
-     * Pairing page. Loopback only.
+     * Pairing page: moved, and this is the sign on the door.
      *
-     * The pairing key is a credential, so it is never printed to a chat, a
-     * log, or a notification. It is shown once, on the machine that owns it,
-     * to a person sitting in front of that machine. The QR code exists so the
-     * key gets to the phone without anyone reading a 32-character hex string
-     * out loud.
-     *
-     * Binding this to loopback means it is unreachable over the tailnet, so a
-     * device that is already on the network still cannot mint itself a token
-     * without physical access to the Mac.
+     * The real page is on a separate loopback-only listener (see `pair.ts`).
+     * It is not served here at any IP, for anyone, because this port is the
+     * one `tailscale serve` proxies -- and behind that proxy every request
+     * looks like it came from `127.0.0.1`, so an IP check here decides
+     * nothing. Refusing unconditionally is the only honest answer this
+     * listener can give.
      */
-    app.get('/pair', async (request, reply) => {
-      const ip = String(request.ip || '');
-      const isLoopback =
-        ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-      if (!isLoopback) {
-        return reply.code(403).type('text/html').send(
-          '<!doctype html><meta charset=utf-8><body style="font:16px system-ui;padding:2rem">' +
-            '<h1>Not here</h1><p>Open this page on the Mac itself: ' +
-            `<code>http://127.0.0.1:${config.port}/pair</code></p></body>`,
-        );
-      }
-
-      const host = opts.tailnetHost?.() || '';
-      const base = host ? `https://${host}` : `http://127.0.0.1:${config.port}`;
-      const link = `${base}/app#pair=${pairingKey}`;
-      const qr = await QRCode.toDataURL(link, {
-        errorCorrectionLevel: 'M',
-        margin: 1,
-        width: 320,
-        color: { dark: '#3d3a34', light: '#f6f3ee' },
-      });
-
-      return reply.type('text/html; charset=utf-8').send(`<!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pair your phone</title>
-<style>
-  body{font:16px/1.55 -apple-system,system-ui,sans-serif;background:#f6f3ee;color:#3d3a34;
-       margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}
-  .card{max-width:26rem;text-align:center}
-  h1{font-family:ui-serif,'New York',Georgia,serif;font-weight:500;font-size:1.6rem;margin:0 0 .35rem}
-  p{margin:.4rem 0;color:#6f6961}
-  img{display:block;margin:1.5rem auto;border-radius:14px;box-shadow:0 2px 20px rgba(0,0,0,.09)}
-  ol{text-align:left;color:#6f6961;padding-left:1.15rem;margin:1.25rem 0 0}
-  li{margin:.4rem 0}
-  code{background:#e9e4db;padding:.12em .4em;border-radius:5px;font-size:.9em}
-  .warn{margin-top:1.5rem;font-size:.85rem;color:#8a8378;border-top:1px solid #e2ddd4;padding-top:1rem}
-</style>
-<div class="card">
-  <h1>Pair your phone</h1>
-  <p>Scan with the phone you want to use Aside on.</p>
-  <img src="${qr}" width="320" height="320" alt="Pairing QR code">
-  <ol>
-    <li>Make sure Tailscale is installed and signed in on the phone.</li>
-    <li>Scan the code. It opens Aside and pairs in one step.</li>
-    <li>In Chrome, tap the menu and choose <b>Add to Home screen</b>.</li>
-    <li>Launch it from the icon from now on.</li>
-  </ol>
-  <p class="warn">This link is a key to your Mac. Anyone who has it and is on
-  your tailnet can use your agent. Reload this page to see it again; it does
-  not expire on its own.</p>
-</div>`);
+    app.get('/pair', async (_request, reply) => {
+      const pairPort = opts.pairPort ?? config.port + 1;
+      return reply.code(403).type('text/html; charset=utf-8').send(
+        '<!doctype html><meta charset=utf-8><body style="font:16px system-ui;padding:2rem">' +
+          '<h1>Not here</h1><p>The pairing page is only served on the Mac itself, ' +
+          'on a port nothing proxies. Open it there:</p>' +
+          `<p><code>http://127.0.0.1:${pairPort}/pair</code></p></body>`,
+      );
     });
 
     app.setNotFoundHandler((request, reply) => {
