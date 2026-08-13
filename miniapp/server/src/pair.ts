@@ -155,9 +155,14 @@ export function buildPairServer(opts: PairServerOptions): FastifyInstance {
   <div class="plat">
     <h2>Android</h2>
     <ol>
-      <li>Scan the code. It opens Aside and pairs in one step.</li>
-      <li>In Chrome, tap the menu and choose <b>Add to Home screen</b>.</li>
-      <li>Launch it from the icon from now on.</li>
+      <li>Get the app: <a id="apk" href="${base}/Aside-mobile.apk">Download Aside-mobile.apk</a>,
+          then open it from your notifications to install. Chrome will ask to
+          allow installs from this source the first time -- allow it.</li>
+      <li>The shell launches already paired: the key above is baked into this
+          build, so there is no scan step after installing.</li>
+      <li>No APK, or installing is not an option: scan the code instead. It
+          opens Aside as a tab, and <b>Add to Home screen</b> from Chrome's
+          menu keeps the same pairing.</li>
     </ol>
   </div>
 
